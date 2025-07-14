@@ -70,8 +70,9 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
                 // For multi-level abstractions, substitute for the outermost binding
                 // which corresponds to the highest index in the current context
                 let substituted = substitute(*level, first_arg, body)?;
-                // Always shift down by 1 since we're removing one level of abstraction
-                let reduced = shift(-1, 1, &substituted)?;
+                // Shift down by 1 only variables that are bound by outer lambdas
+                // Variables with indices < level are bound by inner lambdas
+                let reduced = shift(-1, level + 1, &substituted)?;
 
                 if *level == 1 {
                     // Single abstraction: we're done with this abstraction
