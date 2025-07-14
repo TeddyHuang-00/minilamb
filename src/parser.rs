@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 use crate::{
     expr::{Expr, simplify},
     lexer::{Lexer, Token},
@@ -17,28 +19,26 @@ pub struct Parser {
     context: Vec<String>, // Variable binding context for De Bruijn conversion
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum ParseError {
+    #[error("Expected {expected} but found {found:?} at position {position}")]
     UnexpectedToken {
         expected: String,
         found: Token,
         position: usize,
     },
-    UnboundVariable {
-        name: String,
-        position: usize,
-    },
+    #[error("Unbound variable '{name}' at position {position}")]
+    UnboundVariable { name: String, position: usize },
+    #[error("De Bruijn index {index} exceeds maximum depth {max_depth} at position {position}")]
     InvalidDeBruijnIndex {
         index: usize,
         max_depth: usize,
         position: usize,
     },
-    MixedVariableFormats {
-        position: usize,
-    },
-    EmptyExpression {
-        position: usize,
-    },
+    #[error("Mixed variable formats (named and De Bruijn) at position {position}")]
+    MixedVariableFormats { position: usize },
+    #[error("Empty expression at position {position}")]
+    EmptyExpression { position: usize },
 }
 
 impl Parser {
@@ -322,47 +322,6 @@ impl Parser {
         }
     }
 }
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnexpectedToken {
-                expected,
-                found,
-                position,
-            } => {
-                write!(
-                    f,
-                    "Expected {expected} but found {found:?} at position {position}"
-                )
-            }
-            Self::UnboundVariable { name, position } => {
-                write!(f, "Unbound variable '{name}' at position {position}")
-            }
-            Self::InvalidDeBruijnIndex {
-                index,
-                max_depth,
-                position,
-            } => {
-                write!(
-                    f,
-                    "De Bruijn index {index} exceeds maximum depth {max_depth} at position {position}"
-                )
-            }
-            Self::MixedVariableFormats { position } => {
-                write!(
-                    f,
-                    "Mixed variable formats (named and De Bruijn) at position {position}"
-                )
-            }
-            Self::EmptyExpression { position } => {
-                write!(f, "Empty expression at position {position}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ParseError {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

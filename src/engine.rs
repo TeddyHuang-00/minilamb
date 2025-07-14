@@ -1,4 +1,5 @@
 use anyhow::Result;
+use thiserror::Error;
 
 use crate::expr::{Expr, shift, simplify, substitute};
 
@@ -6,30 +7,17 @@ use crate::expr::{Expr, shift, simplify, substitute};
 ///
 /// This enum represents the different failure modes when evaluating
 /// lambda expressions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum EvaluationError {
     /// Evaluation exceeded the maximum number of reduction steps.
     /// Contains the limit that was exceeded.
+    #[error("Reduction limit of {0} steps exceeded")]
     ReductionLimitExceeded(usize),
     /// The expression is invalid or malformed.
     /// Contains a description of the problem.
+    #[error("Invalid expression: {0}")]
     InvalidExpression(String),
 }
-
-impl std::fmt::Display for EvaluationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ReductionLimitExceeded(limit) => {
-                write!(f, "Reduction limit of {limit} steps exceeded")
-            }
-            Self::InvalidExpression(msg) => {
-                write!(f, "Invalid expression: {msg}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvaluationError {}
 
 /// Performs a single step of β-reduction on a lambda expression.
 ///
