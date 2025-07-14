@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::expr::{Expr, shift, substitute};
+use crate::expr::{Expr, shift, simplify, substitute};
 
 /// Errors that can occur during lambda calculus evaluation.
 ///
@@ -178,7 +178,7 @@ pub fn evaluate(expr: &Expr, max_steps: usize) -> Result<Expr> {
                 current = reduced;
                 steps += 1;
             }
-            None => return Ok(current), // Normal form reached
+            None => return Ok(simplify(&current)), // Normal form reached, simplify before returning
         }
     }
 
@@ -421,7 +421,8 @@ mod tests {
 
         let result = evaluate(&expr, 100).unwrap();
         // After one level of β-reduction, we get λ.a with proper index adjustment
-        // The free variable var(5) gets shifted to var(6) due to substitution at depth 2
+        // The free variable var(5) gets shifted to var(6) due to substitution at depth
+        // 2
         assert_eq!(result, Expr::abs(Expr::var(6))); // λ.6
     }
 

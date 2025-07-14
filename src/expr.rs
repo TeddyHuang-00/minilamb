@@ -18,7 +18,8 @@ pub enum Expr {
     Var(usize),            // De Bruijn index variable (1-based, must be > 0)
     Abs(usize, Box<Expr>), // Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
     #[allow(clippy::vec_box)]
-    App(Vec<Box<Expr>>), // Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2) ... an
+    App(Vec<Box<Expr>>), /* Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2)
+                            * ... an */
 }
 
 impl std::fmt::Debug for Expr {
@@ -54,14 +55,21 @@ impl std::fmt::Display for Expr {
             Self::App(exprs) => {
                 // Handle precedence: abstraction extends to the right
                 // Add parentheses around function if it's an abstraction
-                // Add parentheses around arguments if they're applications (to preserve right-associativity)
+                // Add parentheses around arguments if they're applications (to preserve
+                // right-associativity)
                 let formatted_exprs: Vec<String> = exprs
                     .iter()
                     .enumerate()
                     .map(|(i, expr)| {
                         match expr.as_ref() {
-                            Self::Abs(..) if i == 0 => format!("({expr})"), // Parenthesize abstraction when used as function
-                            Self::App(..) if i > 0 => format!("({expr})"), // Parenthesize applications when used as arguments
+                            Self::Abs(..) if i == 0 => format!("({expr})"), /* Parenthesize */
+                            // abstraction
+                            // when used as
+                            // function
+                            Self::App(..) if i > 0 => format!("({expr})"), /* Parenthesize */
+                            // applications
+                            // when used as
+                            // arguments
                             _ => expr.to_string(),
                         }
                     })
@@ -178,6 +186,50 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
                 .map(|expr| substitute(idx, src, expr).map(Box::new))
                 .collect();
             Ok(App(substituted_exprs?))
+        }
+    }
+}
+
+/// Simplifies an expression by compressing consecutive abstractions.
+///
+/// Transforms consecutive single-level abstractions like `Abs(1,
+/// Box::new(Abs(1, body)))` into multi-level abstractions like `Abs(2, body)`.
+///
+/// # Arguments
+/// * `expr` - The expression to simplify
+///
+/// # Returns
+/// Returns the simplified expression with consecutive abstractions compressed.
+///
+/// # Examples
+/// ```
+/// use minilamb::expr::{Expr, simplify};
+///
+/// // λ.λ.1 becomes λλ.1
+/// let nested = Expr::Abs(1, Box::new(Expr::Abs(1, Box::new(Expr::Var(1)))));
+/// let simplified = simplify(&nested);
+/// assert_eq!(simplified, Expr::Abs(2, Box::new(Expr::Var(1))));
+/// ```
+#[must_use]
+pub fn simplify(expr: &Expr) -> Expr {
+    use Expr::{Abs, App, Var};
+    match expr {
+        Var(k) => Var(*k),
+        Abs(level, body) => {
+            let simplified_body = simplify(body);
+
+            // Check if the body is also an abstraction
+            if let Abs(inner_level, inner_body) = simplified_body {
+                // Combine consecutive abstractions
+                Abs(level + inner_level, inner_body)
+            } else {
+                Abs(*level, Box::new(simplified_body))
+            }
+        }
+        App(exprs) => {
+            let simplified_exprs: Vec<Box<Expr>> =
+                exprs.iter().map(|expr| Box::new(simplify(expr))).collect();
+            App(simplified_exprs)
         }
     }
 }
@@ -494,5 +546,133 @@ mod tests {
             Expr::var(4),
         ]);
         assert_eq!(expr.to_string(), "(λλ.1) (2 3) 4");
+    }
+
+    #[test]
+    fn test_simplify_variable() {
+        // Variables should remain unchanged
+        let expr = Expr::var(1);
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, Expr::var(1));
+
+        let expr = Expr::var(5);
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, Expr::var(5));
+    }
+
+    #[test]
+    fn test_simplify_single_abstraction() {
+        // Single abstractions should remain unchanged
+        let expr = Expr::abs(Expr::var(1));
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, Expr::abs(Expr::var(1)));
+
+        let expr = Expr::abs_multi(3, Expr::var(2));
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(2)));
+    }
+
+    #[test]
+    fn test_simplify_consecutive_abstractions() {
+        // λ.λ.1 should become λλ.1
+        let nested = Expr::abs(Expr::abs(Expr::var(1)));
+        let simplified = simplify(&nested);
+        assert_eq!(simplified, Expr::abs_multi(2, Expr::var(1)));
+
+        // λ.λ.λ.2 should become λλλ.2
+        let triple_nested = Expr::abs(Expr::abs(Expr::abs(Expr::var(2))));
+        let simplified = simplify(&triple_nested);
+        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(2)));
+    }
+
+    #[test]
+    fn test_simplify_mixed_abstractions() {
+        // λλ.λ.1 should become λλλ.1 (combining multi-level with single)
+        let mixed = Expr::abs_multi(2, Expr::abs(Expr::var(1)));
+        let simplified = simplify(&mixed);
+        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(1)));
+
+        // λ.λλ.2 should become λλλ.2 (combining single with multi-level)
+        let mixed = Expr::abs(Expr::abs_multi(2, Expr::var(2)));
+        let simplified = simplify(&mixed);
+        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(2)));
+    }
+
+    #[test]
+    fn test_simplify_deep_nesting() {
+        // λ.λ.λ.λ.λ.3 should become λλλλλ.3
+        let deep_nested = Expr::abs(Expr::abs(Expr::abs(Expr::abs(Expr::abs(Expr::var(3))))));
+        let simplified = simplify(&deep_nested);
+        assert_eq!(simplified, Expr::abs_multi(5, Expr::var(3)));
+    }
+
+    #[test]
+    fn test_simplify_application_with_nested_abstractions() {
+        // (λ.λ.1) (λ.λ.2) should become (λλ.1) (λλ.2)
+        let app = Expr::app(
+            Expr::abs(Expr::abs(Expr::var(1))),
+            Expr::abs(Expr::abs(Expr::var(2))),
+        );
+        let simplified = simplify(&app);
+        let expected = Expr::app(
+            Expr::abs_multi(2, Expr::var(1)),
+            Expr::abs_multi(2, Expr::var(2)),
+        );
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_simplify_complex_expression() {
+        // Test simplification of a complex expression with mixed nesting
+        // λ.λ.(1 (λ.λ.2)) should become λλ.(1 (λλ.2))
+        let complex = Expr::abs(Expr::abs(Expr::app(
+            Expr::var(1),
+            Expr::abs(Expr::abs(Expr::var(2))),
+        )));
+        let simplified = simplify(&complex);
+        let expected =
+            Expr::abs_multi(2, Expr::app(Expr::var(1), Expr::abs_multi(2, Expr::var(2))));
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_simplify_multi_argument_application() {
+        // Test simplification with multi-argument applications
+        // (λ.λ.1) a (λ.λ.2) should become (λλ.1) a (λλ.2)
+        let app = Expr::app_multi(vec![
+            Expr::abs(Expr::abs(Expr::var(1))),
+            Expr::var(3),
+            Expr::abs(Expr::abs(Expr::var(2))),
+        ]);
+        let simplified = simplify(&app);
+        let expected = Expr::app_multi(vec![
+            Expr::abs_multi(2, Expr::var(1)),
+            Expr::var(3),
+            Expr::abs_multi(2, Expr::var(2)),
+        ]);
+        assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_simplify_already_simplified() {
+        // Already simplified expressions should remain unchanged
+        let expr = Expr::abs_multi(3, Expr::var(1));
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, expr);
+
+        let expr = Expr::app_multi(vec![Expr::abs_multi(2, Expr::var(1)), Expr::var(2)]);
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, expr);
+    }
+
+    #[test]
+    fn test_simplify_non_consecutive_abstractions() {
+        // λ.(1 λ.2) should only simplify the inner abstraction, not combine them
+        let non_consecutive = Expr::abs(Expr::app(Expr::var(1), Expr::abs(Expr::var(2))));
+        let simplified = simplify(&non_consecutive);
+        // The outer abstraction should remain single-level since they're not
+        // consecutive
+        let expected = Expr::abs(Expr::app(Expr::var(1), Expr::abs(Expr::var(2))));
+        assert_eq!(simplified, expected);
     }
 }
