@@ -5,18 +5,20 @@ use anyhow::{Result, bail};
 /// This enum represents expressions in the untyped lambda calculus:
 /// - `Var(usize)`: Variable, using 1-based De Bruijn index (must be > 0)
 /// - `Abs(usize, Box<Expr>)`: Lambda abstraction (level, function body)
-/// - `App(Box<Expr>, Box<Expr>)`: Application (function call)
+/// - `App(Vec<Box<Expr>>)`: Application (function call with multiple arguments)
 ///
 /// # Examples
 /// ```
 /// use minilamb::expr::Expr;
 /// let id = Expr::Abs(1, Box::new(Expr::Var(1))); // λ.1
+/// let app = Expr::App(vec![Box::new(id.clone()), Box::new(Expr::Var(2))]); // (λ.1) 2
 /// ```
 #[derive(Hash, Clone, PartialEq, Eq)]
 pub enum Expr {
-    Var(usize),                // De Bruijn index variable (1-based, must be > 0)
-    Abs(usize, Box<Expr>),     // Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
-    App(Box<Expr>, Box<Expr>), // Application (e1 e2)
+    Var(usize),            // De Bruijn index variable (1-based, must be > 0)
+    Abs(usize, Box<Expr>), // Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
+    #[allow(clippy::vec_box)]
+    App(Vec<Box<Expr>>), // Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2) ... an
 }
 
 impl std::fmt::Debug for Expr {
@@ -30,8 +32,9 @@ impl std::fmt::Debug for Expr {
                 let lambdas = "λ".repeat(*level);
                 write!(f, "({lambdas}.{body:?})")
             }
-            Self::App(func, arg) => {
-                write!(f, "({func:?} {arg:?})")
+            Self::App(exprs) => {
+                let expr_strs: Vec<String> = exprs.iter().map(|e| format!("{e:?}")).collect();
+                write!(f, "({})", expr_strs.join(" "))
             }
         }
     }
@@ -48,20 +51,22 @@ impl std::fmt::Display for Expr {
                 let lambdas = "λ".repeat(*level);
                 write!(f, "{lambdas}.{body}")
             }
-            Self::App(func, arg) => {
+            Self::App(exprs) => {
                 // Handle precedence: abstraction extends to the right
                 // Add parentheses around function if it's an abstraction
-                // Add parentheses around argument if it's an application (to preserve
-                // right-associativity)
-                let func_str = match func.as_ref() {
-                    Self::Abs(..) => format!("({func})"),
-                    _ => func.to_string(),
-                };
-                let arg_str = match arg.as_ref() {
-                    Self::App(..) => format!("({arg})"),
-                    _ => arg.to_string(),
-                };
-                write!(f, "{func_str} {arg_str}")
+                // Add parentheses around arguments if they're applications (to preserve right-associativity)
+                let formatted_exprs: Vec<String> = exprs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, expr)| {
+                        match expr.as_ref() {
+                            Self::Abs(..) if i == 0 => format!("({expr})"), // Parenthesize abstraction when used as function
+                            Self::App(..) if i > 0 => format!("({expr})"), // Parenthesize applications when used as arguments
+                            _ => expr.to_string(),
+                        }
+                    })
+                    .collect();
+                write!(f, "{}", formatted_exprs.join(" "))
             }
         }
     }
@@ -113,10 +118,12 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
             let body = shift(delta, cutoff + level, body)?;
             Ok(Abs(*level, Box::new(body)))
         }
-        App(func, arg) => {
-            let func = shift(delta, cutoff, func)?;
-            let arg = shift(delta, cutoff, arg)?;
-            Ok(App(Box::new(func), Box::new(arg)))
+        App(exprs) => {
+            let shifted_exprs: Result<Vec<Box<Expr>>, _> = exprs
+                .iter()
+                .map(|expr| shift(delta, cutoff, expr).map(Box::new))
+                .collect();
+            Ok(App(shifted_exprs?))
         }
     }
 }
@@ -165,10 +172,12 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
             let body = substitute(idx + level, &src, body)?;
             Ok(Abs(*level, Box::new(body)))
         }
-        App(func, arg) => {
-            let func = substitute(idx, src, func)?;
-            let arg = substitute(idx, src, arg)?;
-            Ok(App(Box::new(func), Box::new(arg)))
+        App(exprs) => {
+            let substituted_exprs: Result<Vec<Box<Expr>>, _> = exprs
+                .iter()
+                .map(|expr| substitute(idx, src, expr).map(Box::new))
+                .collect();
+            Ok(App(substituted_exprs?))
         }
     }
 }
@@ -209,7 +218,20 @@ mod tests {
 
         #[must_use]
         pub fn app(func: Self, arg: Self) -> Self {
-            App(Box::new(func), Box::new(arg))
+            App(vec![Box::new(func), Box::new(arg)])
+        }
+
+        /// Creates a multi-argument application
+        ///
+        /// # Panics
+        /// Panics if the vector has fewer than 2 elements
+        #[must_use]
+        pub fn app_multi(exprs: Vec<Self>) -> Self {
+            assert!(
+                exprs.len() >= 2,
+                "Application must have at least 2 expressions (function + argument)"
+            );
+            App(exprs.into_iter().map(Box::new).collect())
         }
     }
 
@@ -436,5 +458,41 @@ mod tests {
         let expr = Expr::app(Expr::abs(Expr::var(2)), Expr::var(6));
         let result = shift(0, 1, &expr).unwrap();
         assert_eq!(result, expr);
+    }
+
+    #[test]
+    fn test_multi_app_display() {
+        // Test basic multi-argument application display
+        let expr = Expr::app_multi(vec![Expr::var(1), Expr::var(2), Expr::var(3)]);
+        assert_eq!(expr.to_string(), "1 2 3");
+    }
+
+    #[test]
+    fn test_multi_app_with_abstraction() {
+        // Test multi-argument application with abstraction as function
+        let expr = Expr::app_multi(vec![Expr::abs(Expr::var(1)), Expr::var(2), Expr::var(3)]);
+        assert_eq!(expr.to_string(), "(λ.1) 2 3");
+    }
+
+    #[test]
+    fn test_multi_app_with_nested_app() {
+        // Test multi-argument application with nested applications
+        let expr = Expr::app_multi(vec![
+            Expr::var(1),
+            Expr::app(Expr::var(2), Expr::var(3)),
+            Expr::var(4),
+        ]);
+        assert_eq!(expr.to_string(), "1 (2 3) 4");
+    }
+
+    #[test]
+    fn test_multi_app_complex_nesting() {
+        // Test complex nested multi-argument applications
+        let expr = Expr::app_multi(vec![
+            Expr::abs_multi(2, Expr::var(1)),
+            Expr::app_multi(vec![Expr::var(2), Expr::var(3)]),
+            Expr::var(4),
+        ]);
+        assert_eq!(expr.to_string(), "(λλ.1) (2 3) 4");
     }
 }

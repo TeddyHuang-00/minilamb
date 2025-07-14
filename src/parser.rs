@@ -214,7 +214,8 @@ impl Parser {
 
     fn parse_application(&mut self) -> Result<Expr, ParseError> {
         // Parse left-associative application: f g h = ((f g) h)
-        let mut expr = self.parse_atom()?;
+        // Now compressed as App(vec![f, g, h])
+        let mut exprs = vec![self.parse_atom()?];
 
         while !self.is_at_end() && !matches!(self.peek(), Some(Token::RParen | Token::Eof)) {
             self.skip_whitespace();
@@ -222,10 +223,16 @@ impl Parser {
                 break;
             }
             let arg = self.parse_atom()?;
-            expr = Expr::App(Box::new(expr), Box::new(arg));
+            exprs.push(arg);
         }
 
-        Ok(expr)
+        // If only one expression, return it directly
+        if exprs.len() == 1 {
+            Ok(exprs.into_iter().next().unwrap_or_else(|| unreachable!()))
+        } else {
+            // Create compressed application
+            Ok(Expr::App(exprs.into_iter().map(Box::new).collect()))
+        }
     }
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
@@ -376,7 +383,10 @@ mod tests {
             1,
             Box::new(Expr::Abs(
                 1,
-                Box::new(Expr::App(Box::new(Expr::var(2)), Box::new(Expr::var(1)))),
+                Box::new(Expr::App(vec![
+                    Box::new(Expr::var(2)),
+                    Box::new(Expr::var(1)),
+                ])),
             )),
         );
         assert_eq!(expr, expected);
@@ -394,7 +404,10 @@ mod tests {
             1,
             Box::new(Expr::Abs(
                 1,
-                Box::new(Expr::App(Box::new(Expr::var(1)), Box::new(Expr::var(2)))),
+                Box::new(Expr::App(vec![
+                    Box::new(Expr::var(1)),
+                    Box::new(Expr::var(2)),
+                ])),
             )),
         );
         assert_eq!(expr, expected);
@@ -426,10 +439,11 @@ mod tests {
                 1,
                 Box::new(Expr::Abs(
                     1,
-                    Box::new(Expr::App(
-                        Box::new(Expr::App(Box::new(Expr::var(3)), Box::new(Expr::var(2)))),
+                    Box::new(Expr::App(vec![
+                        Box::new(Expr::var(3)),
+                        Box::new(Expr::var(2)),
                         Box::new(Expr::var(1)),
-                    )),
+                    ])),
                 )),
             )),
         );
@@ -445,7 +459,10 @@ mod tests {
             1,
             Box::new(Expr::Abs(
                 1,
-                Box::new(Expr::App(Box::new(Expr::var(2)), Box::new(Expr::var(1)))),
+                Box::new(Expr::App(vec![
+                    Box::new(Expr::var(2)),
+                    Box::new(Expr::var(1)),
+                ])),
             )),
         );
         assert_eq!(expr, expected);
@@ -463,10 +480,13 @@ mod tests {
             1,
             Box::new(Expr::Abs(
                 1,
-                Box::new(Expr::App(
+                Box::new(Expr::App(vec![
                     Box::new(Expr::var(2)),
-                    Box::new(Expr::App(Box::new(Expr::var(2)), Box::new(Expr::var(1)))),
-                )),
+                    Box::new(Expr::App(vec![
+                        Box::new(Expr::var(2)),
+                        Box::new(Expr::var(1)),
+                    ])),
+                ])),
             )),
         );
         assert_eq!(expr, expected);
@@ -552,10 +572,13 @@ mod tests {
             1,
             Box::new(Expr::Abs(
                 1,
-                Box::new(Expr::App(
+                Box::new(Expr::App(vec![
                     Box::new(Expr::var(2)),
-                    Box::new(Expr::App(Box::new(Expr::var(2)), Box::new(Expr::var(1)))),
-                )),
+                    Box::new(Expr::App(vec![
+                        Box::new(Expr::var(2)),
+                        Box::new(Expr::var(1)),
+                    ])),
+                ])),
             )),
         );
         assert_eq!(expr, expected);
@@ -613,5 +636,78 @@ mod tests {
             let reparsed = Parser::parse(&output).unwrap();
             assert_eq!(expr, reparsed, "Roundtrip failed for input: {input}");
         }
+    }
+
+    #[test]
+    fn test_multi_argument_application() {
+        // Test with lambda context
+        let expr = Parser::parse("λf.λa.λb.λc.f a b c").unwrap();
+        let expected = Expr::Abs(
+            1,
+            Box::new(Expr::Abs(
+                1,
+                Box::new(Expr::Abs(
+                    1,
+                    Box::new(Expr::Abs(
+                        1,
+                        Box::new(Expr::App(vec![
+                            Box::new(Expr::var(4)), // f
+                            Box::new(Expr::var(3)), // a
+                            Box::new(Expr::var(2)), // b
+                            Box::new(Expr::var(1)), // c
+                        ])),
+                    )),
+                )),
+            )),
+        );
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_multi_argument_debruijn() {
+        // Test multi-argument application with De Bruijn indices
+        let expr = Parser::parse("λ.λ.λ.3 2 1").unwrap();
+        let expected = Expr::Abs(
+            1,
+            Box::new(Expr::Abs(
+                1,
+                Box::new(Expr::Abs(
+                    1,
+                    Box::new(Expr::App(vec![
+                        Box::new(Expr::var(3)),
+                        Box::new(Expr::var(2)),
+                        Box::new(Expr::var(1)),
+                    ])),
+                )),
+            )),
+        );
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_nested_multi_argument() {
+        // Test nested multi-argument applications
+        let expr = Parser::parse("λf.λg.λx.λy.f (g x) y").unwrap();
+        let expected = Expr::Abs(
+            1,
+            Box::new(Expr::Abs(
+                1,
+                Box::new(Expr::Abs(
+                    1,
+                    Box::new(Expr::Abs(
+                        1,
+                        Box::new(Expr::App(vec![
+                            Box::new(Expr::var(4)), // f
+                            Box::new(Expr::App(vec![
+                                Box::new(Expr::var(3)),
+                                Box::new(Expr::var(2)),
+                            ])), // g x
+                            Box::new(Expr::var(1)), // y
+                        ])),
+                    )),
+                )),
+            )),
+        );
+        assert_eq!(expr, expected);
     }
 }
