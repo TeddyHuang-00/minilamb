@@ -19,7 +19,8 @@ pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
     mode: ParseMode,
-    context: Vec<String>, // Variable binding context for De Bruijn conversion
+    context: Vec<String>,   // Variable binding context for De Bruijn conversion
+    free_vars: Vec<String>, // Free variable names for consistent indexing
 }
 
 #[derive(Debug, Clone, Error)]
@@ -28,14 +29,6 @@ pub enum ParseError {
     UnexpectedToken {
         expected: String,
         found: Token,
-        position: usize,
-    },
-    #[error("Unbound variable '{name}' at position {position}")]
-    UnboundVariable { name: String, position: usize },
-    #[error("De Bruijn index {index} exceeds maximum depth {max_depth} at position {position}")]
-    InvalidDeBruijnIndex {
-        index: usize,
-        max_depth: usize,
         position: usize,
     },
     #[error("Mixed variable formats (named and De Bruijn) at position {position}")]
@@ -52,6 +45,7 @@ impl Parser {
             current: 0,
             mode: ParseMode::Auto,
             context: Vec::new(),
+            free_vars: Vec::new(),
         }
     }
 
@@ -260,7 +254,7 @@ impl Parser {
             Some(Token::Ident(name)) => {
                 let name = name.clone();
                 self.advance();
-                self.resolve_variable(&name)
+                Ok(self.resolve_variable(&name))
             }
             Some(Token::Number(index)) => {
                 let index = *index;
@@ -290,19 +284,28 @@ impl Parser {
         }
     }
 
-    fn resolve_variable(&self, name: &str) -> Result<Expr, ParseError> {
+    fn resolve_variable(&mut self, name: &str) -> Expr {
         // Convert variable name to De Bruijn index (1-based)
         for (i, var) in self.context.iter().rev().enumerate() {
             if var == name {
                 // Convert 0-based context index to 1-based usize
                 let index = i + 1;
-                return Ok(Expr::Var(index));
+                return Expr::Var(index);
             }
         }
-        Err(ParseError::UnboundVariable {
-            name: name.to_string(),
-            position: self.current,
-        })
+
+        // Variable not found in context - treat as free variable
+        // Check if we've seen this free variable before
+        if let Some(free_idx) = self.free_vars.iter().position(|v| v == name) {
+            // Use existing free variable index
+            let index = self.context.len() + free_idx + 1;
+            return Expr::Var(index);
+        }
+
+        // New free variable - add to the list
+        self.free_vars.push(name.to_string());
+        let index = self.context.len() + self.free_vars.len();
+        Expr::Var(index)
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -416,10 +419,21 @@ mod tests {
     }
 
     #[test]
-    fn test_unbound_variable_error() {
-        // Should error on unbound variables
+    fn test_free_variables() {
+        // Should treat unbound variables as free variables
         let result = Parser::parse("λx.y");
-        assert!(matches!(result, Err(ParseError::UnboundVariable { .. })));
+        assert!(result.is_ok());
+        let expr = result.unwrap();
+        // y should be treated as a free variable with index 2 (beyond the binding
+        // context of x)
+        assert_eq!(expr, abs!(1, 2));
+
+        // Test multiple free variables
+        let result = Parser::parse("λx.λy.z w");
+        assert!(result.is_ok());
+        let expr = result.unwrap();
+        // z should be index 3, w should be index 4 (beyond binding context of x, y)
+        assert_eq!(expr, abs!(2, app!(3, 4)));
     }
 
     #[test]
