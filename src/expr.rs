@@ -125,7 +125,7 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
             Ok(Abs(*level, Box::new(body)))
         }
         App(exprs) => {
-            let shifted_exprs: Result<Vec<Box<Expr>>, _> = exprs
+            let shifted_exprs: Result<Vec<Box<Expr>>> = exprs
                 .iter()
                 .map(|expr| shift(delta, cutoff, expr).map(Box::new))
                 .collect();
@@ -137,10 +137,16 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
 /// Substitutes the variable at index `idx` in the target expression `tgt` with
 /// the source expression `src`.
 ///
+/// This implementation uses a specialized substitution semantics designed for
+/// compressed multi-level abstractions. When a variable is substituted, the
+/// source expression is shifted by the substitution index to account for the
+/// binding depth in multi-level abstractions.
+///
 /// Uses 1-based De Bruijn indices throughout.
 ///
 /// # Arguments
-/// * `idx` - The variable index to substitute (1-based)
+/// * `idx` - The variable index to substitute (1-based, corresponds to binding
+///   depth)
 /// * `src` - The expression to substitute in
 /// * `tgt` - The target expression
 ///
@@ -157,7 +163,7 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
 /// let src = Expr::Var(5);
 /// let tgt = Expr::Var(1);
 /// let result = substitute(1, &src, &tgt).unwrap();
-/// assert_eq!(result, Expr::Var(6));
+/// assert_eq!(result, Expr::Var(6)); // src shifted by idx (1)
 /// ```
 pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
     use Expr::{Abs, App, Var};
@@ -167,7 +173,10 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
                 bail!("Invalid variable index: 0 (must be positive)");
             }
             if *k == idx {
-                // Substitute the variable - shift source by idx to account for binding depth
+                // Substitute the variable with the source expression.
+                // For multi-level abstractions, the source needs to be shifted by idx
+                // to account for the binding depth. This allows proper substitution
+                // in compressed multi-level abstractions (e.g., λλλ.3).
                 shift(idx.try_into()?, 1, src)
             } else {
                 Ok(Var(*k))
@@ -179,7 +188,7 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
             Ok(Abs(*level, Box::new(body)))
         }
         App(exprs) => {
-            let substituted_exprs: Result<Vec<Box<Expr>>, _> = exprs
+            let substituted_exprs: Result<Vec<Box<Expr>>> = exprs
                 .iter()
                 .map(|expr| substitute(idx, src, expr).map(Box::new))
                 .collect();
@@ -474,7 +483,8 @@ mod tests {
 
     #[test]
     fn test_substitute_exact_match() {
-        // Substituting variable 1 with variable 5 in variable 1 should give variable 5
+        // Substituting variable 1 with variable 5 in variable 1 should give variable 6
+        // due to shifting by the substitution index (1) to account for binding depth
         let src = 5.into_expr();
         let tgt = 1.into_expr();
         let result = substitute(1, &src, &tgt).unwrap();
@@ -500,8 +510,7 @@ mod tests {
         let result = substitute(1, &src, &tgt).unwrap();
         assert_eq!(result, abs!(1, 1));
 
-        // substitute(1, var(2), λ.2) - variable 2 becomes variable 1 after adjustment,
-        // should substitute
+        // substitute(1, var(2), λ.2) - the source gets shifted and substituted
         let src = 2.into_expr();
         let tgt = abs!(1, 2);
         let result = substitute(1, &src, &tgt).unwrap();
@@ -525,7 +534,7 @@ mod tests {
     #[test]
     fn test_substitute_complex_expr() {
         // Test substitution in a complex expression: (λ.1) 2
-        // substitute(2, var(9), (λ.1) 2) should give (λ.1) 10 (9 shifted by 1)
+        // substitute(2, var(9), (λ.1) 2) should give (λ.1) 11 (9 shifted by 2)
         let src = 9.into_expr();
         let abs_expr = abs!(1, 1);
         let tgt = app!(abs_expr.clone(), 2);
@@ -550,10 +559,11 @@ mod tests {
 
     #[test]
     fn test_identity_substitution() {
-        // Substituting a variable with itself results in shifting
+        // Substituting a variable with itself results in shifting by the substitution
+        // index
         let expr = 2.into_expr();
         let result = substitute(2, &2.into_expr(), &expr).unwrap();
-        assert_eq!(result, 4.into_expr()); // var(2) shifted by 1
+        assert_eq!(result, 4.into_expr()); // var(2) shifted by 2
     }
 
     #[test]
