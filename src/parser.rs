@@ -7,9 +7,12 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseMode {
-    Auto,     // Detect format automatically
-    DeBruijn, // Force De Bruijn parsing
-    Named,    // Force named variable parsing
+    /// Detect format automatically
+    Auto,
+    /// Force De Bruijn parsing
+    DeBruijn,
+    /// Force named variable parsing
+    Named,
 }
 
 pub struct Parser {

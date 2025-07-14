@@ -15,11 +15,13 @@ use anyhow::{Result, bail};
 /// ```
 #[derive(Hash, Clone, PartialEq, Eq)]
 pub enum Expr {
-    Var(usize),            // De Bruijn index variable (1-based, must be > 0)
-    Abs(usize, Box<Expr>), // Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
+    /// De Bruijn index variable (1-based, must be > 0)
+    Var(usize),
+    /// Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
+    Abs(usize, Box<Expr>),
     #[allow(clippy::vec_box)]
-    App(Vec<Box<Expr>>), /* Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2)
-                            * ... an */
+    /// Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2) ... an
+    App(Vec<Box<Expr>>),
 }
 
 impl std::fmt::Debug for Expr {
@@ -62,14 +64,10 @@ impl std::fmt::Display for Expr {
                     .enumerate()
                     .map(|(i, expr)| {
                         match expr.as_ref() {
-                            Self::Abs(..) if i == 0 => format!("({expr})"), /* Parenthesize */
-                            // abstraction
-                            // when used as
-                            // function
-                            Self::App(..) if i > 0 => format!("({expr})"), /* Parenthesize */
-                            // applications
-                            // when used as
-                            // arguments
+                            Self::Abs(..) if i < exprs.len() - 1 => format!("({expr})"),
+                            // Parenthesize abstractions when not the last argument
+                            Self::App(..) if i > 0 => format!("({expr})"),
+                            // Parenthesize applications when not the first argument
                             _ => expr.to_string(),
                         }
                     })
