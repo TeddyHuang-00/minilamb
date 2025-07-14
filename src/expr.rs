@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::{Result, bail};
 
 /// Lambda calculus expression (using De Bruijn indices)
@@ -197,16 +199,22 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
     }
 }
 
-/// Simplifies an expression by compressing consecutive abstractions.
+/// Simplifies an expression by compressing consecutive abstractions and
+/// normalizing free variables.
 ///
-/// Transforms consecutive single-level abstractions like `Abs(1,
-/// Box::new(Abs(1, body)))` into multi-level abstractions like `Abs(2, body)`.
+/// This function performs two types of simplification:
+/// 1. Transforms consecutive single-level abstractions like `Abs(1,
+///    Box::new(Abs(1, body)))` into multi-level abstractions like `Abs(2,
+///    body)`.
+/// 2. Normalizes free variables to use consecutive indices starting from the
+///    first available index after all bound variables.
 ///
 /// # Arguments
 /// * `expr` - The expression to simplify
 ///
 /// # Returns
-/// Returns the simplified expression with consecutive abstractions compressed.
+/// Returns the simplified expression with consecutive abstractions compressed
+/// and free variables normalized.
 ///
 /// # Examples
 /// ```
@@ -216,28 +224,205 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
 /// let nested = abs!(1, abs!(1, 1));
 /// let simplified = simplify(&nested);
 /// assert_eq!(simplified, abs!(2, 1));
+///
+/// // Free variable normalization: λ.5 becomes λ.2
+/// let expr = abs!(1, 5);
+/// let simplified = simplify(&expr);
+/// assert_eq!(simplified, abs!(1, 2));
 /// ```
 #[must_use]
 pub fn simplify(expr: &Expr) -> Expr {
+    // First, do abstraction compression
+    let compressed = compress_abstractions(expr);
+
+    // Then, normalize free variables
+    normalize_free_variables(&compressed)
+}
+
+/// Compresses consecutive abstractions in an expression.
+///
+/// Transforms consecutive single-level abstractions like `Abs(1,
+/// Box::new(Abs(1, body)))` into multi-level abstractions like `Abs(2, body)`.
+///
+/// # Arguments
+/// * `expr` - The expression to compress
+///
+/// # Returns
+/// Returns the expression with consecutive abstractions compressed.
+#[must_use]
+pub fn compress_abstractions(expr: &Expr) -> Expr {
     use Expr::{Abs, App, Var};
     match expr {
         Var(k) => Var(*k),
         Abs(level, body) => {
-            let simplified_body = simplify(body);
+            let compressed_body = compress_abstractions(body);
 
             // Check if the body is also an abstraction
-            if let Abs(inner_level, inner_body) = simplified_body {
+            if let Abs(inner_level, inner_body) = compressed_body {
                 // Combine consecutive abstractions
                 Abs(level + inner_level, inner_body)
             } else {
-                Abs(*level, Box::new(simplified_body))
+                Abs(*level, Box::new(compressed_body))
             }
         }
         App(exprs) => {
-            let simplified_exprs: Vec<Box<Expr>> =
-                exprs.iter().map(|expr| Box::new(simplify(expr))).collect();
-            App(simplified_exprs)
+            let compressed_exprs: Vec<Box<Expr>> = exprs
+                .iter()
+                .map(|expr| Box::new(compress_abstractions(expr)))
+                .collect();
+            App(compressed_exprs)
         }
+    }
+}
+
+/// Normalizes free variables in an expression to use consecutive indices.
+///
+/// Free variables are renumbered to start from the first available index after
+/// all bound variables, using consecutive integers.
+///
+/// # Arguments
+/// * `expr` - The expression to normalize
+///
+/// # Returns
+/// Returns the expression with normalized free variable indices.
+///
+/// # Examples
+/// ```
+/// use minilamb::{abs, expr::normalize_free_variables, expr::IntoExpr};
+///
+/// // Standalone free variable: 5 becomes 1
+/// let expr = 5_usize.into_expr();
+/// let normalized = normalize_free_variables(&expr);
+/// assert_eq!(normalized, 1_usize.into_expr());
+///
+/// // With abstraction: λ.5 becomes λ.2
+/// let expr = abs!(1, 5);
+/// let normalized = normalize_free_variables(&expr);
+/// assert_eq!(normalized, abs!(1, 2));
+/// ```
+#[must_use]
+pub fn normalize_free_variables(expr: &Expr) -> Expr {
+    // Collect all free variables with their binding contexts
+    let free_vars = collect_free_variables(expr, 0);
+
+    if free_vars.is_empty() {
+        // No free variables to normalize
+        return expr.clone();
+    }
+
+    // Find the maximum binding depth in the expression
+    let max_binding_depth = find_max_binding_depth(expr);
+
+    // Create mapping from old indices to new consecutive indices
+    let mut unique_free_vars: Vec<usize> = free_vars.into_iter().collect();
+    unique_free_vars.sort_unstable();
+    unique_free_vars.dedup();
+
+    let mapping: HashMap<usize, usize> = unique_free_vars
+        .into_iter()
+        .enumerate()
+        .map(|(i, old_index)| (old_index, max_binding_depth + i + 1))
+        .collect();
+
+    // Apply the mapping
+    apply_free_variable_mapping(expr, &mapping, 0)
+}
+
+/// Collects all free variables in an expression.
+///
+/// A variable is considered free if its De Bruijn index is greater than the
+/// current binding depth (i.e., it's not bound by any enclosing abstraction).
+///
+/// # Arguments
+/// * `expr` - The expression to analyze
+/// * `binding_depth` - The current binding depth (number of enclosing
+///   abstractions)
+///
+/// # Returns
+/// Returns a set of all free variable indices in the expression.
+fn collect_free_variables(expr: &Expr, binding_depth: usize) -> HashSet<usize> {
+    use Expr::{Abs, App, Var};
+    match expr {
+        Var(k) => {
+            if *k > binding_depth {
+                // This is a free variable
+                std::iter::once(*k).collect()
+            } else {
+                HashSet::new()
+            }
+        }
+        Abs(level, body) => collect_free_variables(body, binding_depth + level),
+        App(exprs) => exprs
+            .iter()
+            .flat_map(|e| collect_free_variables(e, binding_depth))
+            .collect(),
+    }
+}
+
+/// Finds the maximum binding depth in an expression.
+///
+/// This determines how many variable indices are reserved for bound variables,
+/// which helps determine where free variable indices should start.
+///
+/// # Arguments
+/// * `expr` - The expression to analyze
+///
+/// # Returns
+/// Returns the maximum binding depth in the expression.
+fn find_max_binding_depth(expr: &Expr) -> usize {
+    use Expr::{Abs, App, Var};
+    match expr {
+        Var(_) => 0,
+        Abs(level, body) => *level + find_max_binding_depth(body),
+        App(exprs) => exprs
+            .iter()
+            .map(|e| find_max_binding_depth(e))
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// Applies a mapping to replace free variables with their normalized indices.
+///
+/// # Arguments
+/// * `expr` - The expression to transform
+/// * `mapping` - The mapping from old indices to new indices
+/// * `binding_depth` - The current binding depth
+///
+/// # Returns
+/// Returns the expression with free variables replaced according to the
+/// mapping.
+fn apply_free_variable_mapping(
+    expr: &Expr,
+    mapping: &HashMap<usize, usize>,
+    binding_depth: usize,
+) -> Expr {
+    use Expr::{Abs, App, Var};
+    match expr {
+        Var(k) => {
+            if *k > binding_depth {
+                // This is a free variable, apply mapping
+                if let Some(&new_k) = mapping.get(k) {
+                    Var(new_k)
+                } else {
+                    Var(*k) // Shouldn't happen if mapping is complete
+                }
+            } else {
+                Var(*k) // Bound variable, keep as is
+            }
+        }
+        Abs(level, body) => Abs(
+            *level,
+            Box::new(apply_free_variable_mapping(
+                body,
+                mapping,
+                binding_depth + level,
+            )),
+        ),
+        App(exprs) => App(exprs
+            .iter()
+            .map(|e| Box::new(apply_free_variable_mapping(e, mapping, binding_depth)))
+            .collect()),
     }
 }
 
@@ -604,14 +789,14 @@ mod tests {
 
     #[test]
     fn test_simplify_variable() {
-        // Variables should remain unchanged
+        // Bound variables should remain unchanged, free variables should be normalized
         let expr = 1.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, 1.into_expr());
+        assert_eq!(simplified, 1.into_expr()); // Free variable normalized to 1
 
         let expr = 5.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, 5.into_expr());
+        assert_eq!(simplified, 1.into_expr()); // Free variable normalized to 1
     }
 
     #[test]
@@ -691,14 +876,15 @@ mod tests {
 
     #[test]
     fn test_simplify_already_simplified() {
-        // Already simplified expressions should remain unchanged
+        // Already simplified expressions should remain unchanged (bound variables)
         let expr = abs!(3, 1);
         let simplified = simplify(&expr);
         assert_eq!(simplified, expr);
 
+        // Free variables get normalized: (λλ.1) 2 → (λλ.1) 3 (2 is free, becomes 3)
         let expr = app!(abs!(2, 1), 2);
         let simplified = simplify(&expr);
-        assert_eq!(simplified, expr);
+        assert_eq!(simplified, app!(abs!(2, 1), 3));
     }
 
     #[test]
@@ -798,6 +984,211 @@ mod tests {
             Box::new(Abs(1, Box::new(Var(2)))),
         ]);
         assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_collect_free_variables_simple() {
+        // Test collecting free variables from simple expressions
+
+        // Single free variable
+        let expr = 5.into_expr();
+        let free_vars = collect_free_variables(&expr, 0);
+        assert_eq!(free_vars, std::iter::once(5).collect());
+
+        // No free variables (bound)
+        let expr = 1.into_expr();
+        let free_vars = collect_free_variables(&expr, 2);
+        assert!(free_vars.is_empty());
+
+        // Mixed bound and free
+        let free_vars = collect_free_variables(&3.into_expr(), 2);
+        assert_eq!(free_vars, std::iter::once(3).collect());
+    }
+
+    #[test]
+    fn test_collect_free_variables_abstraction() {
+        // Test collecting free variables from abstractions
+
+        // λ.3 - variable 3 is free (beyond binding depth 1)
+        let expr = abs!(1, 3);
+        let free_vars = collect_free_variables(&expr, 0);
+        assert_eq!(free_vars, std::iter::once(3).collect());
+
+        // λλ.3 - variable 3 is free (beyond binding depth 2)
+        let expr = abs!(2, 3);
+        let free_vars = collect_free_variables(&expr, 0);
+        assert_eq!(free_vars, std::iter::once(3).collect());
+
+        // λ.1 - no free variables (1 is bound)
+        let expr = abs!(1, 1);
+        let free_vars = collect_free_variables(&expr, 0);
+        assert!(free_vars.is_empty());
+    }
+
+    #[test]
+    fn test_collect_free_variables_application() {
+        // Test collecting free variables from applications
+
+        // 3 4 - both are free variables
+        let expr = app!(3, 4);
+        let free_vars = collect_free_variables(&expr, 2);
+        assert_eq!(free_vars, [3, 4].into_iter().collect());
+
+        // λ.2 3 - variable 3 is free, 2 is bound
+        let expr = app!(abs!(1, 2), 3);
+        let free_vars = collect_free_variables(&expr, 0);
+        assert_eq!(free_vars, [2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn test_find_max_binding_depth() {
+        // Test finding maximum binding depth
+
+        // Single variable - no binding
+        let expr = 5.into_expr();
+        assert_eq!(find_max_binding_depth(&expr), 0);
+
+        // Single abstraction
+        let expr = abs!(1, 1);
+        assert_eq!(find_max_binding_depth(&expr), 1);
+
+        // Multi-level abstraction
+        let expr = abs!(3, 1);
+        assert_eq!(find_max_binding_depth(&expr), 3);
+
+        // Nested abstractions
+        let expr = abs!(1, abs!(2, 1));
+        assert_eq!(find_max_binding_depth(&expr), 3);
+
+        // Application with different depths
+        let expr = app!(abs!(2, 1), abs!(1, 1));
+        assert_eq!(find_max_binding_depth(&expr), 2);
+    }
+
+    #[test]
+    fn test_normalize_free_variables_simple() {
+        // Test basic free variable normalization
+
+        // Single free variable: 5 → 1
+        let expr = 5.into_expr();
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, 1.into_expr());
+
+        // Multiple free variables: 7 3 → 1 2
+        let expr = app!(7, 3);
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, app!(2, 1)); // Note: sorted order
+    }
+
+    #[test]
+    fn test_normalize_free_variables_with_abstractions() {
+        // Test free variable normalization with abstractions
+
+        // λ.5 → λ.2 (first free variable after binding depth 1)
+        let expr = abs!(1, 5);
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, abs!(1, 2));
+
+        // λλ.7 → λλ.3 (first free variable after binding depth 2)
+        let expr = abs!(2, 7);
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, abs!(2, 3));
+
+        // λ.3 5 → λ.2 3 (free variables become consecutive)
+        let expr = abs!(1, app!(3, 5));
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, abs!(1, app!(2, 3)));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_complex() {
+        // Test complex expressions with mixed bound and free variables
+
+        // λ.λ.1 3 5 → λ.λ.1 3 4 (bound variable 1 unchanged, free variables normalized)
+        let expr = abs!(1, abs!(1, app!(1, app!(3, 5))));
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, abs!(1, abs!(1, app!(1, app!(3, 4)))));
+
+        // (λ.3) 7 → (λ.2) 3 (both free variables normalized)
+        let expr = app!(abs!(1, 3), 7);
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, app!(abs!(1, 2), 3));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_no_change() {
+        // Test expressions that should not change
+
+        // No free variables
+        let expr = abs!(2, 1);
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, expr);
+
+        // Already normalized free variables
+        let expr = abs!(1, 2);
+        let normalized = normalize_free_variables(&expr);
+        assert_eq!(normalized, expr);
+    }
+
+    #[test]
+    fn test_compress_abstractions_unchanged() {
+        // Test that compress_abstractions works as before
+
+        // λ.λ.1 → λλ.1
+        let nested = abs!(1, abs!(1, 1));
+        let compressed = compress_abstractions(&nested);
+        assert_eq!(compressed, abs!(2, 1));
+
+        // Already compressed
+        let expr = abs!(3, 2);
+        let compressed = compress_abstractions(&expr);
+        assert_eq!(compressed, expr);
+    }
+
+    #[test]
+    fn test_simplify_with_normalization() {
+        // Test that simplify now includes free variable normalization
+
+        // λ.λ.5 → λλ.3 (compression + normalization)
+        let expr = abs!(1, abs!(1, 5));
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, abs!(2, 3));
+
+        // Complex: λ.(λ.7) 9 → λ.(λ.3) 4
+        let expr = abs!(1, app!(abs!(1, 7), 9));
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, abs!(1, app!(abs!(1, 3), 4)));
+    }
+
+    #[test]
+    fn test_simplify_preserves_semantics() {
+        // Test that bound variables are preserved correctly
+
+        // λλλ.2 1 3 - all variables are bound, so no changes except compression
+        let expr = abs!(1, abs!(1, abs!(1, app!(2, app!(1, 3)))));
+        let simplified = simplify(&expr);
+        assert_eq!(simplified, abs!(3, app!(2, app!(1, 3))));
+    }
+
+    #[test]
+    fn test_apply_free_variable_mapping() {
+        // Test the mapping application function
+        let mapping = [(5, 2), (7, 3)].into_iter().collect();
+
+        // Simple variable mapping
+        let expr = 5.into_expr();
+        let mapped = apply_free_variable_mapping(&expr, &mapping, 0);
+        assert_eq!(mapped, 2.into_expr());
+
+        // Bound variable unchanged
+        let expr = 1.into_expr();
+        let mapped = apply_free_variable_mapping(&expr, &mapping, 2);
+        assert_eq!(mapped, 1.into_expr());
+
+        // Mixed mapping in application
+        let expr = app!(5, 7);
+        let mapped = apply_free_variable_mapping(&expr, &mapping, 0);
+        assert_eq!(mapped, app!(2, 3));
     }
 
     #[test]
