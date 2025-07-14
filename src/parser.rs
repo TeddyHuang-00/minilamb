@@ -257,15 +257,8 @@ impl Parser {
                         position: self.current,
                     });
                 }
-                // Convert from 1-based user input to 0-based internal representation
-                if index == 0 {
-                    return Err(ParseError::InvalidDeBruijnIndex {
-                        index,
-                        max_depth: 0,
-                        position: self.current,
-                    });
-                }
-                Ok(Expr::Var(index - 1))
+                // Use usize directly (already validated by lexer)
+                Ok(Expr::Var(index))
             }
             Some(Token::Lambda) => {
                 // Nested abstraction
@@ -285,10 +278,12 @@ impl Parser {
     }
 
     fn resolve_variable(&self, name: &str) -> Result<Expr, ParseError> {
-        // Convert variable name to De Bruijn index
+        // Convert variable name to De Bruijn index (1-based)
         for (i, var) in self.context.iter().rev().enumerate() {
             if var == name {
-                return Ok(Expr::Var(i));
+                // Convert 0-based context index to 1-based usize
+                let index = i + 1;
+                return Ok(Expr::Var(index));
             }
         }
         Err(ParseError::UnboundVariable {
@@ -366,19 +361,19 @@ mod tests {
 
     #[test]
     fn test_de_bruijn_formats() {
-        // λ.1 (identity) - 1-based input becomes 0-based internal
+        // λ.1 (identity) - 1-based input stays 1-based internal
         let expr = Parser::parse("λ.1").unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
 
-        // λλ.2 (const function) - 2 becomes 1 internally
+        // λλ.2 (const function) - 2 stays 2 internally
         let expr = Parser::parse("λλ.2").unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::Var(1))))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::var(2))))));
 
-        // λ.λ.2 1 (application) - 2->1, 1->0 internally
+        // λ.λ.2 1 (application) - indices stay as-is
         let expr = Parser::parse("λ.λ.2 1").unwrap();
         let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::App(
-            Box::new(Expr::Var(1)),
-            Box::new(Expr::Var(0)),
+            Box::new(Expr::var(2)),
+            Box::new(Expr::var(1)),
         )))));
         assert_eq!(expr, expected);
     }
@@ -387,19 +382,19 @@ mod tests {
     fn test_named_variable_formats() {
         // λx.x (identity)
         let expr = Parser::parse("λx.x").unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
 
         // λx.λy.y x
         let expr = Parser::parse("λx.λy.y x").unwrap();
         let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::App(
-            Box::new(Expr::Var(0)),
-            Box::new(Expr::Var(1)),
+            Box::new(Expr::var(1)),
+            Box::new(Expr::var(2)),
         )))));
         assert_eq!(expr, expected);
 
         // λx y.x (abbreviated abstraction)
         let expr = Parser::parse("λx y.x").unwrap();
-        let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::Var(1)))));
+        let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::var(2)))));
         assert_eq!(expr, expected);
     }
 
@@ -409,7 +404,7 @@ mod tests {
         let patterns = ["\\x.x", "/x.x", "|x.x"];
         for pattern in &patterns {
             let expr = Parser::parse(pattern).unwrap();
-            assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+            assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
         }
     }
 
@@ -420,8 +415,8 @@ mod tests {
         // This should parse as λx.λy.λz.((x y) z)
         let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::Abs(Box::new(
             Expr::App(
-                Box::new(Expr::App(Box::new(Expr::Var(2)), Box::new(Expr::Var(1)))),
-                Box::new(Expr::Var(0)),
+                Box::new(Expr::App(Box::new(Expr::var(3)), Box::new(Expr::var(2)))),
+                Box::new(Expr::var(1)),
             ),
         ))))));
         assert_eq!(expr, expected);
@@ -433,8 +428,8 @@ mod tests {
         // Test with bound variables only to avoid unbound variable errors
         let expr = Parser::parse("λx.λy.x y").unwrap();
         let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::App(
-            Box::new(Expr::Var(1)),
-            Box::new(Expr::Var(0)),
+            Box::new(Expr::var(2)),
+            Box::new(Expr::var(1)),
         )))));
         assert_eq!(expr, expected);
     }
@@ -443,13 +438,13 @@ mod tests {
     fn test_parentheses() {
         // Test explicit parentheses
         let expr = Parser::parse("(λx.x)").unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
 
         // Test grouping in applications
         let expr = Parser::parse("λf.λx.f (f x)").unwrap();
         let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::App(
-            Box::new(Expr::Var(1)),
-            Box::new(Expr::App(Box::new(Expr::Var(1)), Box::new(Expr::Var(0)))),
+            Box::new(Expr::var(2)),
+            Box::new(Expr::App(Box::new(Expr::var(2)), Box::new(Expr::var(1)))),
         )))));
         assert_eq!(expr, expected);
     }
@@ -457,7 +452,7 @@ mod tests {
     #[test]
     fn test_mixed_formats_error() {
         // Should error when mixing named variables and De Bruijn indices
-        let result = Parser::parse("λx.0");
+        let result = Parser::parse("λx.1");
         assert!(matches!(
             result,
             Err(ParseError::MixedVariableFormats { .. })
@@ -486,54 +481,53 @@ mod tests {
     #[test]
     fn test_invalid_debruijn_index_zero() {
         // De Bruijn indices must start from 1, not 0
+        // This should now fail at the lexer level since PositiveNumber rejects 0
         let result = Parser::parse("λ.0");
-        assert!(matches!(
-            result,
-            Err(ParseError::InvalidDeBruijnIndex { .. })
-        ));
+        assert!(result.is_err());
+        // Should be a tokenization error about positive numbers
     }
 
     #[test]
     fn test_parse_mode_detection() {
         // Auto-detect De Bruijn mode (1-based input)
         let expr = Parser::parse_with_mode("λ.1", ParseMode::Auto).unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
 
         // Auto-detect Named mode
         let expr = Parser::parse_with_mode("λx.x", ParseMode::Auto).unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
 
         // Force specific mode (1-based input)
         let expr = Parser::parse_with_mode("λ.1", ParseMode::DeBruijn).unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
     }
 
     #[test]
     fn test_whitespace_handling() {
         let expr = Parser::parse("   λ   x   .   x   ").unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
 
         let expr = Parser::parse("\n\tλx.\n\tx\n\t").unwrap();
-        assert_eq!(expr, Expr::Abs(Box::new(Expr::Var(0))));
+        assert_eq!(expr, Expr::Abs(Box::new(Expr::var(1))));
     }
 
     #[test]
     fn test_complex_expressions() {
         // Church boolean TRUE = λt.λf.t
         let expr = Parser::parse("λt.λf.t").unwrap();
-        let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::Var(1)))));
+        let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::var(2)))));
         assert_eq!(expr, expected);
 
         // Church boolean FALSE = λt.λf.f
         let expr = Parser::parse("λt.λf.f").unwrap();
-        let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::Var(0)))));
+        let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::var(1)))));
         assert_eq!(expr, expected);
 
         // Church numeral 2 = λf.λx.f (f x)
         let expr = Parser::parse("λf.λx.f (f x)").unwrap();
         let expected = Expr::Abs(Box::new(Expr::Abs(Box::new(Expr::App(
-            Box::new(Expr::Var(1)),
-            Box::new(Expr::App(Box::new(Expr::Var(1)), Box::new(Expr::Var(0)))),
+            Box::new(Expr::var(2)),
+            Box::new(Expr::App(Box::new(Expr::var(2)), Box::new(Expr::var(1)))),
         )))));
         assert_eq!(expr, expected);
     }

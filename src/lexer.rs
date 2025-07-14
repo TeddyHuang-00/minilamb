@@ -10,7 +10,7 @@ pub enum Token {
     RParen,
     /// Variable names
     Ident(String),
-    /// De Bruijn indices
+    /// De Bruijn indices (1-based)
     Number(usize),
     /// For explicit spacing in applications
     Whitespace,
@@ -105,9 +105,15 @@ impl<'input> Lexer<'input> {
             return Err("Empty number".to_string());
         }
 
-        number_str
+        let parsed_number: usize = number_str
             .parse()
-            .map_err(|_| format!("Invalid number: {number_str}"))
+            .map_err(|_| format!("Invalid number: {number_str}"))?;
+
+        if parsed_number == 0 {
+            Err("De Bruijn indices must be positive (>= 1)".to_string())
+        } else {
+            Ok(parsed_number)
+        }
     }
 
     fn read_identifier(&mut self) -> String {
@@ -179,13 +185,11 @@ mod tests {
 
     #[test]
     fn test_tokenize_numbers() {
-        let mut lexer = Lexer::new("0 1 42 123");
+        let mut lexer = Lexer::new("1 42 123");
         let tokens = lexer.tokenize().unwrap();
         assert_eq!(
             tokens,
             vec![
-                Token::Number(0),
-                Token::Whitespace,
                 Token::Number(1),
                 Token::Whitespace,
                 Token::Number(42),
@@ -194,6 +198,14 @@ mod tests {
                 Token::Eof
             ]
         );
+    }
+
+    #[test]
+    fn test_tokenize_zero_error() {
+        let mut lexer = Lexer::new("0");
+        let result = lexer.tokenize();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be positive"));
     }
 
     #[test]
