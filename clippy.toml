@@ -1,0 +1,3 @@
+# Clippy configuration for strict code quality
+avoid-breaking-exported-api = false
+msrv = "1.85"

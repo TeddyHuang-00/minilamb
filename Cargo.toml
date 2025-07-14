@@ -1,0 +1,45 @@
+[package]
+name = "minilamb"
+version = "0.1.0"
+edition = "2024"
+authors = ["Nan Huang <teddyhuangnan@gmail.com>"]
+description = "A modern Rust project"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TeddyHuang-00/minilamb"
+keywords = ["rust", "cli", "example"]
+categories = ["command-line-utilities"]
+rust-version = "1.85"
+
+[workspace]
+members = ["."]
+
+[dependencies]
+# Error handling (required)
+anyhow = "1.0"
+thiserror = "2.0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+debug = true
+opt-level = 0
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_import_braces = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+# Security-focused lints
+enum_glob_use = "warn"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Deny security-critical lints
+unwrap_used = "deny"
+expect_used = "deny"
