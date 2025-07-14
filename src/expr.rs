@@ -9,9 +9,9 @@ use anyhow::{Result, bail};
 ///
 /// # Examples
 /// ```
-/// use minilamb::expr::Expr;
-/// let id = Expr::Abs(1, Box::new(Expr::Var(1))); // λ.1
-/// let app = Expr::App(vec![Box::new(id.clone()), Box::new(Expr::Var(2))]); // (λ.1) 2
+/// use minilamb::{abs, app};
+/// let id = abs!(1, 1); // λ.1
+/// let app_expr = app!(id.clone(), 2); // (λ.1) 2
 /// ```
 #[derive(Hash, Clone, PartialEq, Eq)]
 pub enum Expr {
@@ -203,12 +203,12 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
 ///
 /// # Examples
 /// ```
-/// use minilamb::expr::{Expr, simplify};
+/// use minilamb::{abs, expr::simplify};
 ///
 /// // λ.λ.1 becomes λλ.1
-/// let nested = Expr::Abs(1, Box::new(Expr::Abs(1, Box::new(Expr::Var(1)))));
+/// let nested = abs!(1, abs!(1, 1));
 /// let simplified = simplify(&nested);
-/// assert_eq!(simplified, Expr::Abs(2, Box::new(Expr::Var(1))));
+/// assert_eq!(simplified, abs!(2, 1));
 /// ```
 #[must_use]
 pub fn simplify(expr: &Expr) -> Expr {
@@ -232,6 +232,73 @@ pub fn simplify(expr: &Expr) -> Expr {
             App(simplified_exprs)
         }
     }
+}
+
+/// Trait for converting values into `Expr` for use in macros.
+///
+/// This trait allows macros to accept both `usize` (converted to `Var`) and
+/// `Expr` values seamlessly.
+pub trait IntoExpr {
+    /// Convert the value into an `Expr`.
+    fn into_expr(self) -> Expr;
+}
+
+impl IntoExpr for usize {
+    fn into_expr(self) -> Expr {
+        assert!(self > 0, "Variable index must be positive");
+        Expr::Var(self)
+    }
+}
+
+impl IntoExpr for Expr {
+    fn into_expr(self) -> Expr {
+        self
+    }
+}
+
+/// Macro for creating lambda abstractions with ergonomic syntax.
+///
+/// # Examples
+/// ```
+/// use minilamb::{abs, Expr};
+///
+/// // Create λλλ.3 (abstraction level 3, variable 3)
+/// let expr = abs!(3, 3);
+/// assert_eq!(expr, Expr::Abs(3, Box::new(Expr::Var(3))));
+///
+/// // Mix with other expressions
+/// let expr = abs!(1, abs!(1, 1));
+/// // This creates λ.λ.1, which gets simplified to λλ.1
+/// ```
+#[macro_export]
+macro_rules! abs {
+    ($level:expr, $body:expr) => {
+        $crate::expr::Expr::Abs($level, Box::new($crate::expr::IntoExpr::into_expr($body)))
+    };
+}
+
+/// Macro for creating applications with ergonomic syntax.
+///
+/// # Examples
+/// ```
+/// use minilamb::{app, abs, Expr};
+///
+/// // Create application of variables: 1 2 3
+/// let expr = app!(1, 2, 3);
+/// assert_eq!(expr, Expr::App(vec![
+///     Box::new(Expr::Var(1)),
+///     Box::new(Expr::Var(2)),
+///     Box::new(Expr::Var(3))
+/// ]));
+///
+/// // Mix with abstractions
+/// let expr = app!(abs!(1, 1), 2);
+/// ```
+#[macro_export]
+macro_rules! app {
+    ($($arg:expr),+ $(,)?) => {
+        $crate::expr::Expr::App(vec![$(Box::new($crate::expr::IntoExpr::into_expr($arg))),+])
+    };
 }
 
 #[cfg(test)]
@@ -289,91 +356,85 @@ mod tests {
 
     #[test]
     fn test_var_display() {
-        let expr = Expr::var(1);
+        let expr = 1.into_expr();
         assert_eq!(expr.to_string(), "1");
 
-        let expr = Expr::var(2);
+        let expr = 2.into_expr();
         assert_eq!(expr.to_string(), "2");
     }
 
     #[test]
     fn test_abs_display() {
-        let expr = Expr::abs(Expr::var(1));
+        let expr = abs!(1, 1);
         assert_eq!(expr.to_string(), "λ.1");
 
-        let expr = Expr::abs(Expr::var(2));
+        let expr = abs!(1, 2);
         assert_eq!(expr.to_string(), "λ.2");
     }
 
     #[test]
     fn test_app_display() {
-        let expr = Expr::app(Expr::abs(Expr::var(1)), Expr::var(2));
+        let expr = app!(abs!(1, 1), 2);
         assert_eq!(expr.to_string(), "(λ.1) 2");
 
-        let expr = Expr::app(Expr::var(3), Expr::var(4));
+        let expr = app!(3, 4);
         assert_eq!(expr.to_string(), "3 4");
     }
 
     #[test]
     fn test_nested_expr_display() {
-        let expr = Expr::app(
-            Expr::app(Expr::var(1), Expr::var(2)),
-            Expr::abs(Expr::var(3)),
-        );
+        let expr = app!(app!(1, 2), abs!(1, 3));
         assert_eq!(expr.to_string(), "1 2 λ.3");
 
-        let nested_expr = Expr::app(
-            Expr::abs(Expr::app(Expr::var(1), Expr::var(2))),
-            Expr::var(3),
-        );
+        let nested_expr = app!(abs!(1, app!(1, 2)), 3);
         assert_eq!(nested_expr.to_string(), "(λ.1 2) 3");
     }
 
     #[test]
     fn test_shift_var_below_cutoff() {
         // Variables below cutoff should not be shifted
-        let expr = Expr::var(1);
+        let expr = 1.into_expr();
         let result = shift(5, 3, &expr).unwrap();
-        assert_eq!(result, Expr::var(1));
+        assert_eq!(result, 1.into_expr());
 
-        let expr = Expr::var(2);
+        let expr = 2.into_expr();
         let result = shift(10, 3, &expr).unwrap();
-        assert_eq!(result, Expr::var(2));
+        assert_eq!(result, 2.into_expr());
     }
 
     #[test]
     fn test_shift_var_above_cutoff() {
         // Variables at or above cutoff should be shifted
-        let expr = Expr::var(3);
+        let expr = 3.into_expr();
         let result = shift(2, 3, &expr).unwrap();
-        assert_eq!(result, Expr::var(5));
+        assert_eq!(result, 5.into_expr());
 
-        let expr = Expr::var(4);
+        let expr = 4.into_expr();
         let result = shift(1, 3, &expr).unwrap();
-        assert_eq!(result, Expr::var(5));
+        assert_eq!(result, 5.into_expr());
     }
 
     #[test]
     fn test_shift_negative_delta() {
         // Test negative shifts
-        let expr = Expr::var(4);
+        let expr = 4.into_expr();
         let result = shift(-1, 3, &expr).unwrap();
-        assert_eq!(result, Expr::var(3));
+        assert_eq!(result, 3.into_expr());
 
-        let expr = Expr::var(9);
+        let expr = 9.into_expr();
         let result = shift(-2, 8, &expr).unwrap();
-        assert_eq!(result, Expr::var(7));
+        assert_eq!(result, 7.into_expr());
     }
 
     #[test]
     fn test_shift_underflow_error() {
         // Should error when shifting would cause underflow (result would be zero or
         // negative)
-        let expr = Expr::var(1);
+        let expr = 1.into_expr();
         let result = shift(-3, 1, &expr);
         assert!(result.is_err());
 
-        let expr = Expr::var(3);
+        let expr = 3.into_expr();
         let result = shift(-4, 3, &expr);
         assert!(result.is_err());
     }
@@ -381,61 +442,54 @@ mod tests {
     #[test]
     fn test_shift_abs() {
         // λ.1 with shift(1, 1) should become λ.1 (variable 1 is below cutoff 2)
-        let expr = Expr::abs(Expr::var(1));
+        let expr = abs!(1, 1);
         let result = shift(1, 1, &expr).unwrap();
-        assert_eq!(result, Expr::abs(Expr::var(1)));
+        assert_eq!(result, abs!(1, 1));
 
         // λ.2 with shift(2, 1) should become λ.4 (variable 2 is at cutoff 2)
-        let expr = Expr::abs(Expr::var(2));
+        let expr = abs!(1, 2);
         let result = shift(2, 1, &expr).unwrap();
-        assert_eq!(result, Expr::abs(Expr::var(4)));
+        assert_eq!(result, abs!(1, 4));
     }
 
     #[test]
     fn test_shift_app() {
         // (1 2) with shift(1, 2) should become (1 3)
-        let expr = Expr::app(Expr::var(1), Expr::var(2));
+        let expr = app!(1, 2);
         let result = shift(1, 2, &expr).unwrap();
-        assert_eq!(result, Expr::app(Expr::var(1), Expr::var(3)));
+        assert_eq!(result, app!(1, 3));
 
         // (2 3) with shift(1, 1) should become (3 4)
-        let expr = Expr::app(Expr::var(2), Expr::var(3));
+        let expr = app!(2, 3);
         let result = shift(1, 1, &expr).unwrap();
-        assert_eq!(result, Expr::app(Expr::var(3), Expr::var(4)));
+        assert_eq!(result, app!(3, 4));
     }
 
     #[test]
     fn test_shift_complex_expr() {
         // Test a complex expression: λ.(1 (λ.2))
-        let inner_abs = Expr::abs(Expr::var(2));
-        let app = Expr::app(Expr::var(1), inner_abs);
-        let expr = Expr::abs(app);
-
+        let expr = abs!(1, app!(1, abs!(1, 2)));
         let result = shift(1, 1, &expr).unwrap();
-
-        let expected_inner_abs = Expr::abs(Expr::var(2));
-        let expected_app = Expr::app(Expr::var(1), expected_inner_abs);
-        let expected = Expr::abs(expected_app);
-
+        let expected = abs!(1, app!(1, abs!(1, 2)));
         assert_eq!(result, expected);
     }
 
     #[test]
     fn test_substitute_exact_match() {
         // Substituting variable 1 with variable 5 in variable 1 should give variable 5
-        let src = Expr::var(5);
-        let tgt = Expr::var(1);
+        let src = 5.into_expr();
+        let tgt = 1.into_expr();
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::var(6));
+        assert_eq!(result, 6.into_expr());
     }
 
     #[test]
     fn test_substitute_no_match() {
         // Substituting variable 1 with variable 5 in variable 2 should give variable 2
-        let src = Expr::var(5);
-        let tgt = Expr::var(2);
+        let src = 5.into_expr();
+        let tgt = 2.into_expr();
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::var(2));
+        assert_eq!(result, 2.into_expr());
     }
 
     #[test]
@@ -443,71 +497,71 @@ mod tests {
         // Test substitution in abstractions
         // substitute(1, var(3), λ.1) - variable 1 becomes variable 2 after index
         // adjustment
-        let src = Expr::var(3);
-        let tgt = Expr::abs(Expr::var(1));
+        let src = 3.into_expr();
+        let tgt = abs!(1, 1);
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::abs(Expr::var(1)));
+        assert_eq!(result, abs!(1, 1));
 
         // substitute(1, var(2), λ.2) - variable 2 becomes variable 1 after adjustment,
         // should substitute
-        let src = Expr::var(2);
-        let tgt = Expr::abs(Expr::var(2));
+        let src = 2.into_expr();
+        let tgt = abs!(1, 2);
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::abs(Expr::var(5)));
+        assert_eq!(result, abs!(1, 5));
     }
 
     #[test]
     fn test_substitute_in_app() {
         // Test substitution in application
-        let src = Expr::var(5);
-        let tgt = Expr::app(Expr::var(1), Expr::var(2));
+        let src = 5.into_expr();
+        let tgt = app!(1, 2);
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::app(Expr::var(6), Expr::var(2)));
+        assert_eq!(result, app!(6, 2));
 
-        let src = Expr::var(7);
-        let tgt = Expr::app(Expr::var(3), Expr::var(2));
+        let src = 7.into_expr();
+        let tgt = app!(3, 2);
         let result = substitute(2, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::app(Expr::var(3), Expr::var(9)));
+        assert_eq!(result, app!(3, 9));
     }
 
     #[test]
     fn test_substitute_complex_expr() {
         // Test substitution in a complex expression: (λ.1) 2
         // substitute(2, var(9), (λ.1) 2) should give (λ.1) 10 (9 shifted by 1)
-        let src = Expr::var(9);
-        let abs_expr = Expr::abs(Expr::var(1));
-        let tgt = Expr::app(abs_expr.clone(), Expr::var(2));
+        let src = 9.into_expr();
+        let abs_expr = abs!(1, 1);
+        let tgt = app!(abs_expr.clone(), 2);
         let result = substitute(2, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::app(abs_expr, Expr::var(11)));
+        assert_eq!(result, app!(abs_expr, 11));
     }
 
     #[test]
     fn test_substitute_nested_abs() {
         // Test substitution in nested abstractions: λ.λ.2
-        let src = Expr::var(5);
-        let tgt = Expr::abs(Expr::abs(Expr::var(2)));
+        let src = 5.into_expr();
+        let tgt = abs!(1, abs!(1, 2));
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::abs(Expr::abs(Expr::var(2))));
+        assert_eq!(result, abs!(1, abs!(1, 2)));
 
         // substitute(1, var(5), λ.λ.3)
-        let src = Expr::var(5);
-        let tgt = Expr::abs(Expr::abs(Expr::var(3)));
+        let src = 5.into_expr();
+        let tgt = abs!(1, abs!(1, 3));
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, Expr::abs(Expr::abs(Expr::var(10))));
+        assert_eq!(result, abs!(1, abs!(1, 10)));
     }
 
     #[test]
     fn test_identity_substitution() {
         // Substituting a variable with itself results in shifting
-        let expr = Expr::var(2);
-        let result = substitute(2, &Expr::var(2), &expr).unwrap();
-        assert_eq!(result, Expr::var(4)); // var(2) shifted by 1
+        let expr = 2.into_expr();
+        let result = substitute(2, &2.into_expr(), &expr).unwrap();
+        assert_eq!(result, 4.into_expr()); // var(2) shifted by 1
     }
 
     #[test]
     fn test_zero_shift() {
         // Zero shift should be identity
-        let expr = Expr::app(Expr::abs(Expr::var(2)), Expr::var(6));
+        let expr = app!(abs!(1, 2), 6);
         let result = shift(0, 1, &expr).unwrap();
         assert_eq!(result, expr);
     }
@@ -515,109 +569,95 @@ mod tests {
     #[test]
     fn test_multi_app_display() {
         // Test basic multi-argument application display
-        let expr = Expr::app_multi(vec![Expr::var(1), Expr::var(2), Expr::var(3)]);
+        let expr = app!(1, 2, 3);
         assert_eq!(expr.to_string(), "1 2 3");
     }
 
     #[test]
     fn test_multi_app_with_abstraction() {
         // Test multi-argument application with abstraction as function
-        let expr = Expr::app_multi(vec![Expr::abs(Expr::var(1)), Expr::var(2), Expr::var(3)]);
+        let expr = app!(abs!(1, 1), 2, 3);
         assert_eq!(expr.to_string(), "(λ.1) 2 3");
     }
 
     #[test]
     fn test_multi_app_with_nested_app() {
         // Test multi-argument application with nested applications
-        let expr = Expr::app_multi(vec![
-            Expr::var(1),
-            Expr::app(Expr::var(2), Expr::var(3)),
-            Expr::var(4),
-        ]);
+        let expr = app!(1, app!(2, 3), 4);
         assert_eq!(expr.to_string(), "1 (2 3) 4");
     }
 
     #[test]
     fn test_multi_app_complex_nesting() {
         // Test complex nested multi-argument applications
-        let expr = Expr::app_multi(vec![
-            Expr::abs_multi(2, Expr::var(1)),
-            Expr::app_multi(vec![Expr::var(2), Expr::var(3)]),
-            Expr::var(4),
-        ]);
+        let expr = app!(abs!(2, 1), app!(2, 3), 4);
         assert_eq!(expr.to_string(), "(λλ.1) (2 3) 4");
     }
 
     #[test]
     fn test_simplify_variable() {
         // Variables should remain unchanged
-        let expr = Expr::var(1);
+        let expr = 1.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, Expr::var(1));
+        assert_eq!(simplified, 1.into_expr());
 
-        let expr = Expr::var(5);
+        let expr = 5.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, Expr::var(5));
+        assert_eq!(simplified, 5.into_expr());
     }
 
     #[test]
     fn test_simplify_single_abstraction() {
         // Single abstractions should remain unchanged
-        let expr = Expr::abs(Expr::var(1));
+        let expr = abs!(1, 1);
         let simplified = simplify(&expr);
-        assert_eq!(simplified, Expr::abs(Expr::var(1)));
+        assert_eq!(simplified, abs!(1, 1));
 
-        let expr = Expr::abs_multi(3, Expr::var(2));
+        let expr = abs!(3, 2);
         let simplified = simplify(&expr);
-        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(2)));
+        assert_eq!(simplified, abs!(3, 2));
     }
 
     #[test]
     fn test_simplify_consecutive_abstractions() {
         // λ.λ.1 should become λλ.1
-        let nested = Expr::abs(Expr::abs(Expr::var(1)));
+        let nested = abs!(1, abs!(1, 1));
         let simplified = simplify(&nested);
-        assert_eq!(simplified, Expr::abs_multi(2, Expr::var(1)));
+        assert_eq!(simplified, abs!(2, 1));
 
         // λ.λ.λ.2 should become λλλ.2
-        let triple_nested = Expr::abs(Expr::abs(Expr::abs(Expr::var(2))));
+        let triple_nested = abs!(1, abs!(1, abs!(1, 2)));
         let simplified = simplify(&triple_nested);
-        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(2)));
+        assert_eq!(simplified, abs!(3, 2));
     }
 
     #[test]
     fn test_simplify_mixed_abstractions() {
         // λλ.λ.1 should become λλλ.1 (combining multi-level with single)
-        let mixed = Expr::abs_multi(2, Expr::abs(Expr::var(1)));
+        let mixed = abs!(2, abs!(1, 1));
         let simplified = simplify(&mixed);
-        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(1)));
+        assert_eq!(simplified, abs!(3, 1));
 
         // λ.λλ.2 should become λλλ.2 (combining single with multi-level)
-        let mixed = Expr::abs(Expr::abs_multi(2, Expr::var(2)));
+        let mixed = abs!(1, abs!(2, 2));
         let simplified = simplify(&mixed);
-        assert_eq!(simplified, Expr::abs_multi(3, Expr::var(2)));
+        assert_eq!(simplified, abs!(3, 2));
     }
 
     #[test]
     fn test_simplify_deep_nesting() {
         // λ.λ.λ.λ.λ.3 should become λλλλλ.3
-        let deep_nested = Expr::abs(Expr::abs(Expr::abs(Expr::abs(Expr::abs(Expr::var(3))))));
+        let deep_nested = abs!(1, abs!(1, abs!(1, abs!(1, abs!(1, 3)))));
         let simplified = simplify(&deep_nested);
-        assert_eq!(simplified, Expr::abs_multi(5, Expr::var(3)));
+        assert_eq!(simplified, abs!(5, 3));
     }
 
     #[test]
     fn test_simplify_application_with_nested_abstractions() {
         // (λ.λ.1) (λ.λ.2) should become (λλ.1) (λλ.2)
-        let app = Expr::app(
-            Expr::abs(Expr::abs(Expr::var(1))),
-            Expr::abs(Expr::abs(Expr::var(2))),
-        );
+        let app = app!(abs!(1, abs!(1, 1)), abs!(1, abs!(1, 2)));
         let simplified = simplify(&app);
-        let expected = Expr::app(
-            Expr::abs_multi(2, Expr::var(1)),
-            Expr::abs_multi(2, Expr::var(2)),
-        );
+        let expected = app!(abs!(2, 1), abs!(2, 2));
         assert_eq!(simplified, expected);
     }
 
@@ -625,13 +665,9 @@ mod tests {
     fn test_simplify_complex_expression() {
         // Test simplification of a complex expression with mixed nesting
         // λ.λ.(1 (λ.λ.2)) should become λλ.(1 (λλ.2))
-        let complex = Expr::abs(Expr::abs(Expr::app(
-            Expr::var(1),
-            Expr::abs(Expr::abs(Expr::var(2))),
-        )));
+        let complex = abs!(1, abs!(1, app!(1, abs!(1, abs!(1, 2)))));
         let simplified = simplify(&complex);
-        let expected =
-            Expr::abs_multi(2, Expr::app(Expr::var(1), Expr::abs_multi(2, Expr::var(2))));
+        let expected = abs!(2, app!(1, abs!(2, 2)));
         assert_eq!(simplified, expected);
     }
 
@@ -639,28 +675,20 @@ mod tests {
     fn test_simplify_multi_argument_application() {
         // Test simplification with multi-argument applications
         // (λ.λ.1) a (λ.λ.2) should become (λλ.1) a (λλ.2)
-        let app = Expr::app_multi(vec![
-            Expr::abs(Expr::abs(Expr::var(1))),
-            Expr::var(3),
-            Expr::abs(Expr::abs(Expr::var(2))),
-        ]);
+        let app = app!(abs!(1, abs!(1, 1)), 3, abs!(1, abs!(1, 2)));
         let simplified = simplify(&app);
-        let expected = Expr::app_multi(vec![
-            Expr::abs_multi(2, Expr::var(1)),
-            Expr::var(3),
-            Expr::abs_multi(2, Expr::var(2)),
-        ]);
+        let expected = app!(abs!(2, 1), 3, abs!(2, 2));
         assert_eq!(simplified, expected);
     }
 
     #[test]
     fn test_simplify_already_simplified() {
         // Already simplified expressions should remain unchanged
-        let expr = Expr::abs_multi(3, Expr::var(1));
+        let expr = abs!(3, 1);
         let simplified = simplify(&expr);
         assert_eq!(simplified, expr);
 
-        let expr = Expr::app_multi(vec![Expr::abs_multi(2, Expr::var(1)), Expr::var(2)]);
+        let expr = app!(abs!(2, 1), 2);
         let simplified = simplify(&expr);
         assert_eq!(simplified, expr);
     }
@@ -668,11 +696,167 @@ mod tests {
     #[test]
     fn test_simplify_non_consecutive_abstractions() {
         // λ.(1 λ.2) should only simplify the inner abstraction, not combine them
-        let non_consecutive = Expr::abs(Expr::app(Expr::var(1), Expr::abs(Expr::var(2))));
+        let non_consecutive = abs!(1, app!(1, abs!(1, 2)));
         let simplified = simplify(&non_consecutive);
         // The outer abstraction should remain single-level since they're not
         // consecutive
-        let expected = Expr::abs(Expr::app(Expr::var(1), Expr::abs(Expr::var(2))));
+        let expected = abs!(1, app!(1, abs!(1, 2)));
         assert_eq!(simplified, expected);
+    }
+
+    #[test]
+    fn test_abs_macro_with_usize() {
+        // Test abs! macro with usize arguments
+        let expr = abs!(1, 1);
+        assert_eq!(expr, Abs(1, Box::new(Var(1))));
+
+        let expr = abs!(3, 2);
+        assert_eq!(expr, Abs(3, Box::new(Var(2))));
+    }
+
+    #[test]
+    fn test_abs_macro_with_expr() {
+        // Test abs! macro with Expr arguments
+        let body = Var(1);
+        let expr = abs!(2, body.clone());
+        assert_eq!(expr, Abs(2, Box::new(body)));
+
+        let nested = App(vec![Box::new(Var(1)), Box::new(Var(2))]);
+        let expr = abs!(1, nested.clone());
+        assert_eq!(expr, Abs(1, Box::new(nested)));
+    }
+
+    #[test]
+    fn test_abs_macro_nested() {
+        // Test nested abs! macros
+        let expr = abs!(1, abs!(1, 1));
+        let expected = Abs(1, Box::new(Abs(1, Box::new(Var(1)))));
+        assert_eq!(expr, expected);
+
+        let expr = abs!(2, abs!(1, 3));
+        let expected = Abs(2, Box::new(Abs(1, Box::new(Var(3)))));
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_app_macro_with_usize() {
+        // Test app! macro with usize arguments
+        let expr = app!(1, 2);
+        let expected = App(vec![Box::new(Var(1)), Box::new(Var(2))]);
+        assert_eq!(expr, expected);
+
+        let expr = app!(1, 2, 3);
+        let expected = App(vec![Box::new(Var(1)), Box::new(Var(2)), Box::new(Var(3))]);
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_app_macro_with_expr() {
+        // Test app! macro with Expr arguments
+        let func = Abs(1, Box::new(Var(1)));
+        let arg = Var(2);
+        let expr = app!(func.clone(), arg.clone());
+        let expected = App(vec![Box::new(func), Box::new(arg)]);
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_app_macro_mixed_args() {
+        // Test app! macro with mixed usize and Expr arguments
+        let abs_expr = Abs(1, Box::new(Var(1)));
+        let expr = app!(abs_expr.clone(), 2, 3);
+        let expected = App(vec![
+            Box::new(abs_expr.clone()),
+            Box::new(Var(2)),
+            Box::new(Var(3)),
+        ]);
+        assert_eq!(expr, expected);
+
+        let expr = app!(1, abs_expr.clone(), 3);
+        let expected = App(vec![Box::new(Var(1)), Box::new(abs_expr), Box::new(Var(3))]);
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_mixed_macro_nesting() {
+        // Test complex nesting of abs! and app! macros
+        let expr = abs!(2, app!(1, 2));
+        let expected = Abs(2, Box::new(App(vec![Box::new(Var(1)), Box::new(Var(2))])));
+        assert_eq!(expr, expected);
+
+        let expr = app!(abs!(1, 1), abs!(1, 2));
+        let expected = App(vec![
+            Box::new(Abs(1, Box::new(Var(1)))),
+            Box::new(Abs(1, Box::new(Var(2)))),
+        ]);
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_complex_macro_expression() {
+        // Test a complex expression using macros: λλ.(2 (λ.1 3))
+        let expr = abs!(2, app!(2, app!(abs!(1, 1), 3)));
+        let expected = Abs(
+            2,
+            Box::new(App(vec![
+                Box::new(Var(2)),
+                Box::new(App(vec![
+                    Box::new(Abs(1, Box::new(Var(1)))),
+                    Box::new(Var(3)),
+                ])),
+            ])),
+        );
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn test_app_macro_trailing_comma() {
+        // Test that trailing commas work in app! macro
+        let expr = app!(1, 2, 3,);
+        let expected = App(vec![Box::new(Var(1)), Box::new(Var(2)), Box::new(Var(3))]);
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Variable index must be positive")]
+    fn test_macro_zero_index_panic() {
+        // Test that using 0 as variable index panics
+        let _expr = abs!(1, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Variable index must be positive")]
+    fn test_app_macro_zero_index_panic() {
+        // Test that using 0 in app! macro panics
+        let _expr = app!(1, 0);
+    }
+
+    #[test]
+    fn test_into_expr_trait() {
+        // Test IntoExpr trait implementations directly
+        let usize_val: usize = 5;
+        let expr_from_usize = usize_val.into_expr();
+        assert_eq!(expr_from_usize, Var(5));
+
+        let expr_val = Abs(1, Box::new(Var(1)));
+        let expr_from_expr = expr_val.clone().into_expr();
+        assert_eq!(expr_from_expr, expr_val);
+    }
+
+    #[test]
+    fn test_macro_ergonomics_comparison() {
+        // Compare macro syntax with verbose syntax for readability test
+
+        // Verbose way
+        let verbose = App(vec![
+            Box::new(Abs(2, Box::new(Var(1)))),
+            Box::new(Var(3)),
+            Box::new(App(vec![Box::new(Var(4)), Box::new(Var(5))])),
+        ]);
+
+        // Macro way
+        let macro_expr = app!(abs!(2, 1), 3, app!(4, 5));
+
+        assert_eq!(macro_expr, verbose);
     }
 }

@@ -327,26 +327,21 @@ impl Parser {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::{abs, app};
 
     #[test]
     fn test_de_bruijn_formats() {
         // λ.1 (identity) - 1-based input stays 1-based internal
         let expr = Parser::parse("λ.1").unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
 
         // λλ.2 (const function) - 2 stays 2 internally
         let expr = Parser::parse("λλ.2").unwrap();
-        assert_eq!(expr, Expr::Abs(2, Box::new(Expr::var(2))));
+        assert_eq!(expr, abs!(2, 2));
 
         // λ.λ.2 1 (application) - consecutive abstractions get simplified to λλ
         let expr = Parser::parse("λ.λ.2 1").unwrap();
-        let expected = Expr::Abs(
-            2,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(2)),
-                Box::new(Expr::var(1)),
-            ])),
-        );
+        let expected = abs!(2, app!(2, 1));
         assert_eq!(expr, expected);
     }
 
@@ -354,22 +349,16 @@ mod tests {
     fn test_named_variable_formats() {
         // λx.x (identity)
         let expr = Parser::parse("λx.x").unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
 
         // λx.λy.y x - consecutive abstractions get simplified
         let expr = Parser::parse("λx.λy.y x").unwrap();
-        let expected = Expr::Abs(
-            2,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(1)),
-                Box::new(Expr::var(2)),
-            ])),
-        );
+        let expected = abs!(2, app!(1, 2));
         assert_eq!(expr, expected);
 
         // λx y.x (abbreviated abstraction)
         let expr = Parser::parse("λx y.x").unwrap();
-        let expected = Expr::Abs(2, Box::new(Expr::var(2)));
+        let expected = abs!(2, 2);
         assert_eq!(expr, expected);
     }
 
@@ -379,7 +368,7 @@ mod tests {
         let patterns = ["\\x.x", "/x.x", "|x.x"];
         for pattern in &patterns {
             let expr = Parser::parse(pattern).unwrap();
-            assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+            assert_eq!(expr, abs!(1, 1));
         }
     }
 
@@ -388,14 +377,7 @@ mod tests {
         // Use free variables for testing application parsing
         let expr = Parser::parse("λx.λy.λz.x y z").unwrap();
         // This should parse as λλλ.((x y) z) due to simplification
-        let expected = Expr::Abs(
-            3,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(3)),
-                Box::new(Expr::var(2)),
-                Box::new(Expr::var(1)),
-            ])),
-        );
+        let expected = abs!(3, app!(3, 2, 1));
         assert_eq!(expr, expected);
     }
 
@@ -404,13 +386,7 @@ mod tests {
         // λx.f g should parse as λx.(f g), not (λx.f) g
         // Test with bound variables only to avoid unbound variable errors
         let expr = Parser::parse("λx.λy.x y").unwrap();
-        let expected = Expr::Abs(
-            2,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(2)),
-                Box::new(Expr::var(1)),
-            ])),
-        );
+        let expected = abs!(2, app!(2, 1));
         assert_eq!(expr, expected);
     }
 
@@ -418,20 +394,11 @@ mod tests {
     fn test_parentheses() {
         // Test explicit parentheses
         let expr = Parser::parse("(λx.x)").unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
 
         // Test grouping in applications
         let expr = Parser::parse("λf.λx.f (f x)").unwrap();
-        let expected = Expr::Abs(
-            2,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(2)),
-                Box::new(Expr::App(vec![
-                    Box::new(Expr::var(2)),
-                    Box::new(Expr::var(1)),
-                ])),
-            ])),
-        );
+        let expected = abs!(2, app!(2, app!(2, 1)));
         assert_eq!(expr, expected);
     }
 
@@ -477,50 +444,41 @@ mod tests {
     fn test_parse_mode_detection() {
         // Auto-detect De Bruijn mode (1-based input)
         let expr = Parser::parse_with_mode("λ.1", ParseMode::Auto).unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
 
         // Auto-detect Named mode
         let expr = Parser::parse_with_mode("λx.x", ParseMode::Auto).unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
 
         // Force specific mode (1-based input)
         let expr = Parser::parse_with_mode("λ.1", ParseMode::DeBruijn).unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
     }
 
     #[test]
     fn test_whitespace_handling() {
         let expr = Parser::parse("   λ   x   .   x   ").unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
 
         let expr = Parser::parse("\n\tλx.\n\tx\n\t").unwrap();
-        assert_eq!(expr, Expr::Abs(1, Box::new(Expr::var(1))));
+        assert_eq!(expr, abs!(1, 1));
     }
 
     #[test]
     fn test_complex_expressions() {
         // Church boolean TRUE = λt.λf.t
         let expr = Parser::parse("λt.λf.t").unwrap();
-        let expected = Expr::Abs(2, Box::new(Expr::var(2)));
+        let expected = abs!(2, 2);
         assert_eq!(expr, expected);
 
         // Church boolean FALSE = λt.λf.f
         let expr = Parser::parse("λt.λf.f").unwrap();
-        let expected = Expr::Abs(2, Box::new(Expr::var(1)));
+        let expected = abs!(2, 1);
         assert_eq!(expr, expected);
 
         // Church numeral 2 = λf.λx.f (f x)
         let expr = Parser::parse("λf.λx.f (f x)").unwrap();
-        let expected = Expr::Abs(
-            2,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(2)),
-                Box::new(Expr::App(vec![
-                    Box::new(Expr::var(2)),
-                    Box::new(Expr::var(1)),
-                ])),
-            ])),
-        );
+        let expected = abs!(2, app!(2, app!(2, 1)));
         assert_eq!(expr, expected);
     }
 
@@ -583,15 +541,7 @@ mod tests {
     fn test_multi_argument_application() {
         // Test with lambda context
         let expr = Parser::parse("λf.λa.λb.λc.f a b c").unwrap();
-        let expected = Expr::Abs(
-            4,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(4)), // f
-                Box::new(Expr::var(3)), // a
-                Box::new(Expr::var(2)), // b
-                Box::new(Expr::var(1)), // c
-            ])),
-        );
+        let expected = abs!(4, app!(4, 3, 2, 1));
         assert_eq!(expr, expected);
     }
 
@@ -599,14 +549,7 @@ mod tests {
     fn test_multi_argument_debruijn() {
         // Test multi-argument application with De Bruijn indices
         let expr = Parser::parse("λ.λ.λ.3 2 1").unwrap();
-        let expected = Expr::Abs(
-            3,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(3)),
-                Box::new(Expr::var(2)),
-                Box::new(Expr::var(1)),
-            ])),
-        );
+        let expected = abs!(3, app!(3, 2, 1));
         assert_eq!(expr, expected);
     }
 
@@ -614,17 +557,7 @@ mod tests {
     fn test_nested_multi_argument() {
         // Test nested multi-argument applications
         let expr = Parser::parse("λf.λg.λx.λy.f (g x) y").unwrap();
-        let expected = Expr::Abs(
-            4,
-            Box::new(Expr::App(vec![
-                Box::new(Expr::var(4)), // f
-                Box::new(Expr::App(vec![
-                    Box::new(Expr::var(3)),
-                    Box::new(Expr::var(2)),
-                ])), // g x
-                Box::new(Expr::var(1)), // y
-            ])),
-        );
+        let expected = abs!(4, app!(4, app!(3, 2), 1));
         assert_eq!(expr, expected);
     }
 }

@@ -40,13 +40,14 @@ pub enum EvaluationError {
 ///
 /// # Examples
 /// ```
+/// use minilamb::{abs, app};
 /// use minilamb::expr::Expr;
 /// use minilamb::engine::reduce_once;
 ///
 /// // (λx.x) y reduces to y (where y is a free variable)
-/// let identity = Expr::Abs(1, Box::new(Expr::Var(1)));
-/// let arg = Expr::Var(2); // Free variable y
-/// let app = Expr::App(vec![Box::new(identity), Box::new(arg.clone())]);
+/// let identity = abs!(1, 1);
+/// let arg = 2; // Free variable y
+/// let app = app!(identity, arg);
 ///
 /// let result = reduce_once(&app).unwrap();
 /// // After substitution and shift, Var(2) stays as Var(2) in 1-based indexing
@@ -140,13 +141,14 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
 ///
 /// # Examples
 /// ```
+/// use minilamb::{abs, app};
 /// use minilamb::expr::Expr;
 /// use minilamb::engine::evaluate;
 ///
 /// // Evaluate identity function: (λx.x) y → y
-/// let identity = Expr::Abs(1, Box::new(Expr::Var(1)));
-/// let arg = Expr::Var(2); // Free variable y
-/// let app = Expr::App(vec![Box::new(identity), Box::new(arg.clone())]);
+/// let identity = abs!(1, 1);
+/// let arg = 2; // Free variable y
+/// let app = app!(identity, arg);
 ///
 /// let result = evaluate(&app, 100).unwrap();
 /// // After evaluation, Var(2) stays as Var(2) in 1-based indexing
@@ -177,7 +179,7 @@ pub fn evaluate(expr: &Expr, max_steps: usize) -> Result<Expr> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::expr::Expr;
+    use crate::{abs, app, expr::Expr};
 
     #[test]
     fn test_reduce_once_variable() {
@@ -190,9 +192,8 @@ mod tests {
     fn test_reduce_once_identity_application() {
         // (λx.x) y → y
         // After substitution and shift down, y (which was free var 2) becomes var 1
-        let identity = Expr::abs(Expr::var(1));
-        let arg = Expr::var(2);
-        let app = Expr::app(identity, arg);
+        let identity = abs!(1, 1);
+        let app = app!(identity, 2);
 
         let result = reduce_once(&app).unwrap();
         // The result should be var(2) since free variable in 1-based indexing
@@ -202,16 +203,14 @@ mod tests {
     #[test]
     fn test_reduce_once_const_function() {
         // (λx.λy.x) a b → (λy.a) b
-        let const_func = Expr::abs(Expr::abs(Expr::var(2)));
-        let arg1 = Expr::var(3);
-        let arg2 = Expr::var(4);
-        let app1 = Expr::app(const_func, arg1);
-        let app2 = Expr::app(app1, arg2);
+        let const_func = abs!(1, abs!(1, 2));
+        let app1 = app!(const_func, 3);
+        let app2 = app!(app1, 4);
 
         let result = reduce_once(&app2).unwrap();
         // After substitution and shift, arg1 (var 3) becomes var 5 in the abstraction
         // body
-        let expected = Expr::app(Expr::abs(Expr::var(5)), Expr::var(4));
+        let expected = app!(abs!(1, 5), 4);
         assert_eq!(result, Some(expected));
     }
 
@@ -220,19 +219,19 @@ mod tests {
         // λx.(λy.z) x → λx.z  where z is a free variable (index 1 in outer context)
         // This avoids the underflow issue by using a free variable instead of bound
         // variable
-        let inner_app = Expr::app(Expr::abs(Expr::var(2)), Expr::var(1));
-        let outer_abs = Expr::abs(inner_app);
+        let inner_app = app!(abs!(1, 2), 1);
+        let outer_abs = abs!(1, inner_app);
 
         let result = reduce_once(&outer_abs).unwrap();
         // After substitution and shift, the free variable z (index 2) becomes index 1
-        let expected = Expr::abs(Expr::var(1));
+        let expected = abs!(1, 1);
         assert_eq!(result, Some(expected));
     }
 
     #[test]
     fn test_reduce_once_no_reduction_possible() {
         // λx.x (identity function in normal form)
-        let identity = Expr::abs(Expr::var(1));
+        let identity = abs!(1, 1);
         let result = reduce_once(&identity).unwrap();
         assert_eq!(result, None);
     }
@@ -241,12 +240,12 @@ mod tests {
     fn test_reduce_once_application_order() {
         // Test that function is reduced before argument in normal order
         // (λx.x x) (λy.y) → (λy.y) (λy.y)
-        let self_app = Expr::abs(Expr::app(Expr::var(1), Expr::var(1)));
-        let identity = Expr::abs(Expr::var(1));
-        let app = Expr::app(self_app, identity.clone());
+        let self_app = abs!(1, app!(1, 1));
+        let identity = abs!(1, 1);
+        let app = app!(self_app, identity.clone());
 
         let result = reduce_once(&app).unwrap();
-        let expected = Expr::app(identity.clone(), identity);
+        let expected = app!(identity.clone(), identity);
         assert_eq!(result, Some(expected));
     }
 
@@ -254,9 +253,8 @@ mod tests {
     fn test_evaluate_identity() {
         // (λx.x) y → y
         // After evaluation, free variable y (var 2) gets shifted down to var(1)
-        let identity = Expr::abs(Expr::var(1));
-        let arg = Expr::var(2);
-        let app = Expr::app(identity, arg);
+        let identity = abs!(1, 1);
+        let app = app!(identity, 2);
 
         let result = evaluate(&app, 100).unwrap();
         assert_eq!(result, Expr::var(2));
@@ -266,11 +264,9 @@ mod tests {
     fn test_evaluate_church_true() {
         // TRUE = λt.λf.t
         // TRUE x y → x
-        let church_true = Expr::abs(Expr::abs(Expr::var(1)));
-        let arg1 = Expr::var(2);
-        let arg2 = Expr::var(3);
-        let app1 = Expr::app(church_true, arg1);
-        let app2 = Expr::app(app1, arg2);
+        let church_true = abs!(1, abs!(1, 1));
+        let app1 = app!(church_true, 2);
+        let app2 = app!(app1, 3);
 
         let result = evaluate(&app2, 100).unwrap();
         // After reduction and shift adjustments in 1-based indexing, var(2) becomes
@@ -283,11 +279,9 @@ mod tests {
         // FALSE = λt.λf.f
         // FALSE x y → y
         // After evaluation, the second argument gets shifted down
-        let church_false = Expr::abs(Expr::abs(Expr::var(1)));
-        let arg1 = Expr::var(2);
-        let arg2 = Expr::var(3);
-        let app1 = Expr::app(church_false, arg1);
-        let app2 = Expr::app(app1, arg2);
+        let church_false = abs!(1, abs!(1, 1));
+        let app1 = app!(church_false, 2);
+        let app2 = app!(app1, 3);
 
         let result = evaluate(&app2, 100).unwrap();
         // After two β-reductions and shifts, var(3) becomes var(3) in 1-based indexing
@@ -297,7 +291,7 @@ mod tests {
     #[test]
     fn test_evaluate_normal_form() {
         // Already in normal form
-        let identity = Expr::abs(Expr::var(1));
+        let identity = abs!(1, 1);
         let result = evaluate(&identity, 100).unwrap();
         assert_eq!(result, identity);
     }
@@ -305,8 +299,8 @@ mod tests {
     #[test]
     fn test_evaluate_reduction_limit_exceeded() {
         // Ω = (λx.x x)(λx.x x) - infinite loop
-        let omega_term = Expr::abs(Expr::app(Expr::var(1), Expr::var(1)));
-        let omega = Expr::app(omega_term.clone(), omega_term);
+        let omega_term = abs!(1, app!(1, 1));
+        let omega = app!(omega_term.clone(), omega_term);
 
         let result = evaluate(&omega, 10);
         assert!(result.is_err());
@@ -321,17 +315,12 @@ mod tests {
     fn test_evaluate_complex_reduction() {
         // (λf.λx.f (f x)) (λy.λz.y) a b
         // This is Church numeral 2 applied to a function and argument
-        let church_two = Expr::abs(Expr::abs(Expr::app(
-            Expr::var(1),
-            Expr::app(Expr::var(2), Expr::var(1)),
-        )));
-        let const_func = Expr::abs(Expr::abs(Expr::var(1)));
-        let arg1 = Expr::var(2);
-        let arg2 = Expr::var(3);
+        let church_two = abs!(1, abs!(1, app!(1, app!(2, 1))));
+        let const_func = abs!(1, abs!(1, 1));
 
-        let app1 = Expr::app(church_two, const_func);
-        let app2 = Expr::app(app1, arg1);
-        let app3 = Expr::app(app2, arg2);
+        let app1 = app!(church_two, const_func);
+        let app2 = app!(app1, 2);
+        let app3 = app!(app2, 3);
 
         // After multiple reductions and shifts, this should result in some valid
         // expression
@@ -364,16 +353,10 @@ mod tests {
     fn test_y_combinator_fixed_point() {
         // Y = λf.(λx.f (x x)) (λx.f (x x))
         // Test that Y doesn't immediately diverge when applied
-        let y_combinator = Expr::abs(Expr::app(
-            Expr::abs(Expr::app(
-                Expr::var(1),
-                Expr::app(Expr::var(1), Expr::var(1)),
-            )),
-            Expr::abs(Expr::app(
-                Expr::var(1),
-                Expr::app(Expr::var(1), Expr::var(1)),
-            )),
-        ));
+        let y_combinator = abs!(
+            1,
+            app!(abs!(1, app!(1, app!(1, 1))), abs!(1, app!(1, app!(1, 1))))
+        );
 
         // Just test that we can construct it and it doesn't panic
         let result = reduce_once(&y_combinator);
@@ -385,12 +368,7 @@ mod tests {
         // Test that multi-argument applications evaluate correctly
         // With multi-level abstractions, each application reduces the level by 1
         // (λλλ.3) a b c → (λλ.3) b c → (λ.3) c → 3
-        let expr = Expr::app_multi(vec![
-            Expr::abs_multi(3, Expr::var(3)), // λλλ.3
-            Expr::var(5),                     // a (free variable)
-            Expr::var(6),                     // b (free variable)
-            Expr::var(7),                     // c (free variable)
-        ]);
+        let expr = app!(abs!(3, 3), 5, 6, 7);
 
         let result = evaluate(&expr, 100).unwrap();
         // After three levels of β-reduction with proper index adjustments
@@ -402,26 +380,19 @@ mod tests {
     fn test_multi_argument_partial_application() {
         // Test partial application of multi-argument functions
         // (λλ.2) a → λ.a
-        let expr = Expr::app_multi(vec![
-            Expr::abs_multi(2, Expr::var(2)), // λλ.2
-            Expr::var(5),                     // a (free variable)
-        ]);
+        let expr = app!(abs!(2, 2), 5);
 
         let result = evaluate(&expr, 100).unwrap();
         // After one level of β-reduction, we get λ.a with proper index adjustment
         // The free variable var(5) gets shifted to var(6) due to substitution at depth
         // 2
-        assert_eq!(result, Expr::abs(Expr::var(6))); // λ.6
+        assert_eq!(result, abs!(1, 6)); // λ.6
     }
 
     #[test]
     fn test_multi_argument_identity_chain() {
         // Test chaining identity functions: (λx.x) (λy.y) z → (λy.y) z → z
-        let expr = Expr::app_multi(vec![
-            Expr::abs(Expr::var(1)), // λx.x
-            Expr::abs(Expr::var(1)), // λy.y
-            Expr::var(3),            // z (free variable)
-        ]);
+        let expr = app!(abs!(1, 1), abs!(1, 1), 3);
 
         let result = evaluate(&expr, 100).unwrap();
         assert_eq!(result, Expr::var(3)); // Should reduce to z
@@ -431,11 +402,7 @@ mod tests {
     fn test_multi_argument_complex_reduction() {
         // Test complex multi-argument reduction
         // (λλ.2 1) (λ.1) z → complex reduction with potential shift issues
-        let expr = Expr::app_multi(vec![
-            Expr::abs_multi(2, Expr::app(Expr::var(2), Expr::var(1))), // λλ.2 1
-            Expr::abs(Expr::var(1)),                                   // λ.1
-            Expr::var(4),                                              // z (free variable)
-        ]);
+        let expr = app!(abs!(2, app!(2, 1)), abs!(1, 1), 4);
 
         // This complex case may result in shift errors due to the interaction
         // between multi-level abstractions and nested applications

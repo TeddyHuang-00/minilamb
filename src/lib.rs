@@ -3,10 +3,10 @@ pub mod expr;
 pub mod lexer;
 pub mod parser;
 
-// Re-export main types and functions for convenient use
 use anyhow::Result;
+// Re-export main types and functions for convenient use
 pub use engine::{EvaluationError, evaluate, reduce_once};
-pub use expr::{Expr, simplify};
+pub use expr::{Expr, IntoExpr, simplify};
 pub use lexer::{Lexer, Token};
 pub use parser::{ParseError, ParseMode, Parser};
 
