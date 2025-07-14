@@ -4,19 +4,37 @@ use anyhow::{Result, bail};
 ///
 /// This enum represents expressions in the untyped lambda calculus:
 /// - `Var(usize)`: Variable, using 1-based De Bruijn index (must be > 0)
-/// - `Abs(Box<Expr>)`: Lambda abstraction (function)
+/// - `Abs(usize, Box<Expr>)`: Lambda abstraction (level, function body)
 /// - `App(Box<Expr>, Box<Expr>)`: Application (function call)
 ///
 /// # Examples
 /// ```
 /// use minilamb::expr::Expr;
-/// let id = Expr::Abs(Box::new(Expr::Var(1))); // λ.1
+/// let id = Expr::Abs(1, Box::new(Expr::Var(1))); // λ.1
 /// ```
-#[derive(Debug, Hash, Clone, PartialEq, Eq)]
+#[derive(Hash, Clone, PartialEq, Eq)]
 pub enum Expr {
     Var(usize),                // De Bruijn index variable (1-based, must be > 0)
-    Abs(Box<Expr>),            // Lambda abstraction (λx.e)
+    Abs(usize, Box<Expr>),     // Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
     App(Box<Expr>, Box<Expr>), // Application (e1 e2)
+}
+
+impl std::fmt::Debug for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Var(n) => {
+                assert!(*n > 0, "Variable index must be positive");
+                write!(f, "{n}")
+            }
+            Self::Abs(level, body) => {
+                let lambdas = "λ".repeat(*level);
+                write!(f, "({lambdas}.{body:?})")
+            }
+            Self::App(func, arg) => {
+                write!(f, "({func:?} {arg:?})")
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for Expr {
@@ -26,8 +44,25 @@ impl std::fmt::Display for Expr {
                 assert!(*n > 0, "Variable index must be positive");
                 write!(f, "{n}")
             }
-            Self::Abs(body) => write!(f, "(λ.{body})"),
-            Self::App(func, arg) => write!(f, "({func} {arg})"),
+            Self::Abs(level, body) => {
+                let lambdas = "λ".repeat(*level);
+                write!(f, "{lambdas}.{body}")
+            }
+            Self::App(func, arg) => {
+                // Handle precedence: abstraction extends to the right
+                // Add parentheses around function if it's an abstraction
+                // Add parentheses around argument if it's an application (to preserve
+                // right-associativity)
+                let func_str = match func.as_ref() {
+                    Self::Abs(..) => format!("({func})"),
+                    _ => func.to_string(),
+                };
+                let arg_str = match arg.as_ref() {
+                    Self::App(..) => format!("({arg})"),
+                    _ => arg.to_string(),
+                };
+                write!(f, "{func_str} {arg_str}")
+            }
         }
     }
 }
@@ -74,9 +109,9 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
                 Ok(Var(*k))
             }
         }
-        Abs(body) => {
-            let body = shift(delta, cutoff + 1, body)?;
-            Ok(Abs(Box::new(body)))
+        Abs(level, body) => {
+            let body = shift(delta, cutoff + level, body)?;
+            Ok(Abs(*level, Box::new(body)))
         }
         App(func, arg) => {
             let func = shift(delta, cutoff, func)?;
@@ -125,10 +160,10 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
                 Ok(Var(*k))
             }
         }
-        Abs(body) => {
-            let src = shift(1, 1, src)?;
-            let body = substitute(idx + 1, &src, body)?;
-            Ok(Abs(Box::new(body)))
+        Abs(level, body) => {
+            let src = shift((*level).try_into()?, 1, src)?;
+            let body = substitute(idx + level, &src, body)?;
+            Ok(Abs(*level, Box::new(body)))
         }
         App(func, arg) => {
             let func = substitute(idx, src, func)?;
@@ -159,7 +194,17 @@ mod tests {
 
         #[must_use]
         pub fn abs(body: Self) -> Self {
-            Abs(Box::new(body))
+            Abs(1, Box::new(body))
+        }
+
+        /// Creates a multi-level abstraction with the given level and body
+        ///
+        /// # Panics
+        /// Panics if level is 0 (must be positive)
+        #[must_use]
+        pub fn abs_multi(level: usize, body: Self) -> Self {
+            assert!(level > 0, "Abstraction level must be positive");
+            Abs(level, Box::new(body))
         }
 
         #[must_use]
@@ -180,19 +225,19 @@ mod tests {
     #[test]
     fn test_abs_display() {
         let expr = Expr::abs(Expr::var(1));
-        assert_eq!(expr.to_string(), "(λ.1)");
+        assert_eq!(expr.to_string(), "λ.1");
 
         let expr = Expr::abs(Expr::var(2));
-        assert_eq!(expr.to_string(), "(λ.2)");
+        assert_eq!(expr.to_string(), "λ.2");
     }
 
     #[test]
     fn test_app_display() {
         let expr = Expr::app(Expr::abs(Expr::var(1)), Expr::var(2));
-        assert_eq!(expr.to_string(), "((λ.1) 2)");
+        assert_eq!(expr.to_string(), "(λ.1) 2");
 
         let expr = Expr::app(Expr::var(3), Expr::var(4));
-        assert_eq!(expr.to_string(), "(3 4)");
+        assert_eq!(expr.to_string(), "3 4");
     }
 
     #[test]
@@ -201,13 +246,13 @@ mod tests {
             Expr::app(Expr::var(1), Expr::var(2)),
             Expr::abs(Expr::var(3)),
         );
-        assert_eq!(expr.to_string(), "((1 2) (λ.3))");
+        assert_eq!(expr.to_string(), "1 2 λ.3");
 
         let nested_expr = Expr::app(
             Expr::abs(Expr::app(Expr::var(1), Expr::var(2))),
             Expr::var(3),
         );
-        assert_eq!(nested_expr.to_string(), "((λ.(1 2)) 3)");
+        assert_eq!(nested_expr.to_string(), "(λ.1 2) 3");
     }
 
     #[test]

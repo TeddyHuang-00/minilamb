@@ -56,7 +56,7 @@ impl std::error::Error for EvaluationError {}
 /// use minilamb::engine::reduce_once;
 ///
 /// // (λx.x) y reduces to y (where y is a free variable)
-/// let identity = Expr::Abs(Box::new(Expr::Var(1)));
+/// let identity = Expr::Abs(1, Box::new(Expr::Var(1)));
 /// let arg = Expr::Var(2); // Free variable y
 /// let app = Expr::App(Box::new(identity), Box::new(arg.clone()));
 ///
@@ -68,10 +68,15 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
     let result = match expr {
         // β-reduction: (λx.e1) e2 → e1[x := e2]
         Expr::App(func, arg) => {
-            if let Expr::Abs(body) = func.as_ref() {
-                // Perform substitution: body[1 := arg] (1-based indexing)
-                let substituted = substitute(1, arg, body)?;
-                Some(shift(-1, 1, &substituted)?)
+            if let Expr::Abs(level, body) = func.as_ref() {
+                if *level == 1 {
+                    // Single abstraction: perform β-reduction
+                    let substituted = substitute(1, arg, body)?;
+                    Some(shift(-1, 1, &substituted)?)
+                } else {
+                    // Multi-level abstraction: reduce level by 1
+                    Some(Expr::Abs(level - 1, body.clone()))
+                }
             } else {
                 // Try to reduce the function
                 if let Some(reduced_func) = reduce_once(func)? {
@@ -82,9 +87,9 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
                 }
             }
         }
-        Expr::Abs(body) => {
+        Expr::Abs(level, body) => {
             // Try to reduce the body
-            reduce_once(body)?.map(|reduced_body| Expr::Abs(Box::new(reduced_body)))
+            reduce_once(body)?.map(|reduced_body| Expr::Abs(*level, Box::new(reduced_body)))
         }
         Expr::Var(_) => None, // Variables cannot be reduced
     };
@@ -115,7 +120,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
 /// use minilamb::engine::evaluate;
 ///
 /// // Evaluate identity function: (λx.x) y → y
-/// let identity = Expr::Abs(Box::new(Expr::Var(1)));
+/// let identity = Expr::Abs(1, Box::new(Expr::Var(1)));
 /// let arg = Expr::Var(2); // Free variable y
 /// let app = Expr::App(Box::new(identity), Box::new(arg.clone()));
 ///
@@ -310,7 +315,7 @@ mod tests {
         // The exact result depends on the complex reduction sequence
         // Let's just check that it doesn't error and produces some result
         match result {
-            Expr::Abs(_) | Expr::Var(_) | Expr::App(..) => (), // Accept any valid result type
+            Expr::Abs(..) | Expr::Var(_) | Expr::App(..) => (), // Accept any valid result type
         }
     }
 
