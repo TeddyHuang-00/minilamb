@@ -2,7 +2,8 @@ use anyhow::Result;
 use thiserror::Error;
 
 use crate::{
-    expr::{Expr, simplify},
+    engine::simplify,
+    expr::Expr,
     lexer::{Lexer, Token},
 };
 
