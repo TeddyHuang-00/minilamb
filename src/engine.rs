@@ -3,37 +3,34 @@ use thiserror::Error;
 
 use crate::expr::Expr;
 
-/// Shifts all free variable indices in the expression greater than or equal to
-/// `cutoff` by `delta`.
-///
-/// Uses 1-based De Bruijn indices throughout.
+/// Adjusts De Bruijn indices to maintain correct variable bindings when
+/// entering or exiting lambda abstractions.
 ///
 /// # Arguments
-/// * `delta` - The amount to shift, can be negative
-/// * `cutoff` - Variables with indices less than this are unaffected (1-based)
-/// * `expr` - The expression to shift
-///
-/// # Returns
-/// Returns a new expression with shifted indices.
+/// * `delta` - How many binding levels to adjust by (positive = deeper,
+///   negative = shallower)
+/// * `cutoff` - Only variables referring to bindings outside this depth are
+///   adjusted
+/// * `expr` - The expression whose variable references need adjustment
 ///
 /// # Errors
-/// Returns an error if shifting would cause an index to overflow or underflow.
+/// Returns an error if adjustment would create invalid variable indices (≤ 0).
 ///
 /// # Examples
 /// ```
 /// use minilamb::{expr::Expr, engine::shift};
-/// let expr = Expr::BoundVar(3);
+///
+/// // Prepare an expression for substitution into a deeper binding context
+/// let expr = Expr::BoundVar(3);  // References a binding 3 levels up
 /// let shifted = shift(1, 2, &expr).unwrap();
+/// // Now references binding 4 levels up, accounting for new abstraction
 /// assert_eq!(shifted, Expr::BoundVar(4));
 /// ```
 pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
     use Expr::{Abs, App, BoundVar, FreeVar};
     match expr {
         BoundVar(k) => {
-            if *k == 0 {
-                bail!("Invalid variable index: 0 (must be positive)");
-            }
-            if *k >= cutoff {
+            if *k > cutoff {
                 let new_val = k.checked_add_signed(delta);
                 match new_val {
                     Some(val) if val > 0 => Ok(BoundVar(val)),
@@ -60,57 +57,47 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
     }
 }
 
-/// Substitutes the variable at index `idx` in the target expression `tgt` with
-/// the source expression `src`.
+/// Substitute the variable at `idx` in the `tgt` expression with `src`.
 ///
-/// This implementation uses a specialized substitution semantics designed for
-/// compressed multi-level abstractions. When a variable is substituted, the
-/// source expression is shifted by the substitution index to account for the
-/// binding depth in multi-level abstractions.
-///
-/// Uses 1-based De Bruijn indices throughout.
+/// The function handles the complex index arithmetic required to maintain
+/// correct De Bruijn bindings across different abstraction depths,
+/// automatically shifting the source expression as needed when entering nested
+/// lambda contexts.
 ///
 /// # Arguments
-/// * `idx` - The variable index to substitute (1-based, corresponds to binding
-///   depth)
-/// * `src` - The expression to substitute in
-/// * `tgt` - The target expression
-///
-/// # Returns
-/// Returns a new expression with the substitution applied.
+/// * `idx` - Which variable binding to replace (1 = innermost lambda, 2 = next
+///   outer, etc.)
+/// * `src` - The expression to substitute in place of the variable
+/// * `tgt` - The expression containing variables to be replaced
 ///
 /// # Errors
-/// Returns an error if any shift operation during substitution would cause
-/// index overflow or underflow.
+/// Returns an error if variable index adjustments would create invalid
+/// references.
 ///
 /// # Examples
 /// ```
 /// use minilamb::{expr::Expr, engine::substitute};
+///
+/// // Replace variable 1 with expression 5 - implements (λx.x) 5 → 5
 /// let src = Expr::BoundVar(5);
 /// let tgt = Expr::BoundVar(1);
 /// let result = substitute(1, &src, &tgt).unwrap();
-/// assert_eq!(result, Expr::BoundVar(6)); // src shifted by idx (1)
+/// assert_eq!(result, Expr::BoundVar(5)); // Variable replaced with source
 /// ```
 pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
     use Expr::{Abs, App, BoundVar, FreeVar};
     match tgt {
         BoundVar(k) => {
-            if *k == 0 {
-                bail!("Invalid variable index: 0 (must be positive)");
-            }
             if *k == idx {
-                // Substitute the variable with the source expression.
-                // For multi-level abstractions, the source needs to be shifted by idx
-                // to account for the binding depth. This allows proper substitution
-                // in compressed multi-level abstractions (e.g., λλλ.3).
-                shift(idx.try_into()?, 1, src)
+                // Substitute the variable with src
+                Ok(src.clone())
             } else {
                 Ok(BoundVar(*k))
             }
         }
         FreeVar(name) => Ok(FreeVar(name.clone())),
         Abs(level, body) => {
-            let src = shift((*level).try_into()?, 1, src)?;
+            let src = shift((*level).try_into()?, 0, src)?;
             let body = substitute(idx + level, &src, body)?;
             Ok(Abs(*level, Box::new(body)))
         }
@@ -124,35 +111,32 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
     }
 }
 
-/// Simplifies an expression by compressing consecutive abstractions and
-/// normalizing free variables.
+/// Cleans up lambda expressions by consolidating nested abstractions for better
+/// readability.
 ///
-/// This function performs two types of simplification:
-/// 1. Transforms consecutive single-level abstractions like `Abs(1,
-///    Box::new(Abs(1, body)))` into multi-level abstractions like `Abs(2,
-///    body)`.
-/// 2. Normalizes free variables to use consecutive indices starting from the
-///    first available index after all bound variables.
+/// The function works recursively throughout the entire expression tree,
+/// ensuring that all parts of complex expressions benefit from this cleanup,
+/// not just the top level.
 ///
 /// # Arguments
-/// * `expr` - The expression to simplify
+/// * `expr` - The expression to clean up and make more readable
 ///
 /// # Returns
-/// Returns the simplified expression with consecutive abstractions compressed
-/// and free variables normalized.
+/// A semantically equivalent expression with consolidated abstractions.
 ///
 /// # Examples
 /// ```
+/// use minilamb::{abs, app, engine::simplify};
 ///
-/// // λ.λ.1 becomes λλ.1
-/// let nested = abs!(1, abs!(1, 1));
-/// let simplified = simplify(&nested);
-/// assert_eq!(simplified, abs!(2, 1));
+/// // Transform nested single abstractions into multi-level form
+/// let verbose = abs!(1, abs!(1, 1));  // λ.λ.1
+/// let clean = simplify(&verbose);
+/// assert_eq!(clean, abs!(2, 1));      // λλ.1
 ///
-/// // Variables remain unchanged: λ.5 stays λ.5
-/// let expr = abs!(1, 5);
-/// let simplified = simplify(&expr);
-/// assert_eq!(simplified, abs!(1, 5));
+/// // Works throughout complex expressions
+/// let complex = app!(abs!(1, abs!(1, 1)), abs!(1, abs!(1, 2)));
+/// let simplified = simplify(&complex);
+/// assert_eq!(simplified, app!(abs!(2, 1), abs!(2, 2)));
 /// ```
 #[must_use]
 pub fn simplify(expr: &Expr) -> Expr {
@@ -170,8 +154,7 @@ pub fn simplify(expr: &Expr) -> Expr {
 ///
 /// # Returns
 /// Returns the expression with consecutive abstractions compressed.
-#[must_use]
-pub fn compress_abstractions(expr: &Expr) -> Expr {
+fn compress_abstractions(expr: &Expr) -> Expr {
     use Expr::{Abs, App, BoundVar, FreeVar};
     match expr {
         BoundVar(k) => BoundVar(*k),
@@ -210,24 +193,23 @@ pub enum EvaluationError {
     InvalidExpression(String),
 }
 
-/// Performs a single step of β-reduction on a lambda expression.
+/// Advances lambda calculus computation by one logical step using β-reduction.
 ///
-/// This function implements the normal order reduction strategy, which reduces
-/// the leftmost-outermost redex first. This strategy guarantees termination
-/// when a normal form exists.
+/// The function employs normal order evaluation (leftmost-outermost first),
+/// which guarantees reaching a result when one exists. Unlike full evaluation,
+/// this lets you observe and control each transformation step.
 ///
 /// # Arguments
-/// * `expr` - The lambda expression to reduce
+/// * `expr` - The expression to attempt reducing by one step
 ///
 /// # Returns
-/// * `Ok(Some(reduced_expr))` - If a reduction was performed
-/// * `Ok(None)` - If the expression is already in normal form
-/// * `Err(_)` - If an error occurred during reduction
+/// * `Some(new_expr)` - Expression after one reduction step
+/// * `None` - Expression is already in normal form (no more reductions
+///   possible)
 ///
 /// # Errors
-/// Returns an error if:
-/// - The expression is invalid or malformed
-/// - A substitution fails
+/// Returns an error if the expression structure is invalid or substitution
+/// fails.
 ///
 /// # Examples
 /// ```
@@ -235,99 +217,86 @@ pub enum EvaluationError {
 /// use minilamb::expr::Expr;
 /// use minilamb::engine::reduce_once;
 ///
-/// // (λx.x) y reduces to y (where y is a free variable)
+/// // Step through function application: (λx.x) y → y
 /// let identity = abs!(1, 1);
-/// let arg = "y"; // Free variable y
-/// let app = app!(identity, arg);
+/// let application = app!(identity, "y");
 ///
-/// let result = reduce_once(&app).unwrap();
-/// // After substitution and shift, the free variable y remains as y
-/// assert_eq!(result, Some(Expr::FreeVar("y".to_string())));
+/// let result = reduce_once(&application).unwrap();
+/// assert_eq!(result, Some(Expr::FreeVar("y".into())));
+///
+/// // Normal forms return None (cannot reduce further)
+/// let normal_form = abs!(1, 1);
+/// assert_eq!(reduce_once(&normal_form).unwrap(), None);
 /// ```
 pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
+    use Expr::{Abs, App, BoundVar, FreeVar};
     let result = match expr {
-        // β-reduction: (λx.e1) e2 → e1[x := e2]
-        Expr::App(exprs) => {
+        // beta reduction with De Bruijn indices
+        App(exprs) => {
             if exprs.len() < 2 {
                 bail!("Application must have at least 2 expressions")
             }
 
-            let func = &exprs[0];
-            let first_arg = &exprs[1];
-
-            if let Expr::Abs(level, body) = func {
-                // For multi-level abstractions, substitute for the outermost binding
-                // which corresponds to the highest index in the current context
-                let substituted = substitute(*level, first_arg, body)?;
-                // Shift down by 1 only variables that are bound by outer lambdas
-                // Variables with indices < level are bound by inner lambdas
-                let reduced = shift(-1, level + 1, &substituted)?;
-
-                if *level == 1 {
-                    // Single abstraction: we're done with this abstraction
-                    if exprs.len() > 2 {
-                        let mut new_exprs = vec![reduced];
-                        new_exprs.extend(exprs[2..].iter().cloned());
-                        Some(Expr::App(new_exprs))
-                    } else {
-                        Some(reduced)
-                    }
+            if let Abs(level, body) = &exprs[0] {
+                // Get the body of the first level abstraction
+                let e1 = if *level == 1 {
+                    body.as_ref().clone()
                 } else {
-                    // Multi-level abstraction: reduce level by 1 and wrap the reduced body
-                    let new_abs = Expr::Abs(level - 1, Box::new(reduced));
-                    if exprs.len() > 2 {
-                        let mut new_exprs = vec![new_abs];
-                        new_exprs.extend(exprs[2..].iter().cloned());
-                        Some(Expr::App(new_exprs))
-                    } else {
-                        Some(new_abs)
-                    }
+                    Abs(level - 1, body.clone())
+                };
+                // Shift up by 1 only variables bound by outer lambdas
+                let e2 = shift(1, 0, &exprs[1])?;
+                // Substitute the reduced abstraction of e1 with e2
+                let substituted = substitute(1, &e2, &e1)?;
+                // Shift down by 1 only variables bound by outer lambdas
+                let reduced = shift(-1, 0, &substituted)?;
+                if exprs.len() > 2 {
+                    Some(App(std::iter::once(reduced)
+                        .chain(exprs[2..].iter().cloned())
+                        .collect()))
+                } else {
+                    Some(reduced)
                 }
             } else {
-                // Try to reduce the function first
-                if let Some(reduced_func) = reduce_once(func)? {
-                    let mut new_exprs = vec![reduced_func];
-                    new_exprs.extend(exprs[1..].iter().cloned());
-                    Some(Expr::App(new_exprs))
-                } else {
-                    // Try to reduce arguments from left to right
-                    for (i, arg) in exprs.iter().enumerate().skip(1) {
-                        if let Some(reduced_arg) = reduce_once(arg)? {
-                            let mut new_exprs = exprs.clone();
-                            new_exprs[i] = reduced_arg;
-                            return Ok(Some(Expr::App(new_exprs)));
-                        }
+                // Try to reduce arguments from left to right
+                for (i, arg) in exprs.iter().enumerate() {
+                    if let Some(reduced_arg) = reduce_once(arg)? {
+                        let mut new_exprs = exprs.clone();
+                        new_exprs[i] = reduced_arg;
+                        return Ok(Some(App(new_exprs)));
                     }
-                    None
                 }
+                None
             }
         }
-        Expr::Abs(level, body) => {
+        Abs(level, body) => {
             // Try to reduce the body
-            reduce_once(body)?.map(|reduced_body| Expr::Abs(*level, Box::new(reduced_body)))
+            reduce_once(body)?.map(|reduced_body| Abs(*level, Box::new(reduced_body)))
         }
-        Expr::BoundVar(_) | Expr::FreeVar(_) => None, // Variables cannot be reduced
+        BoundVar(_) | FreeVar(_) => None, // Variables cannot be reduced
     };
 
     Ok(result)
 }
 
-/// Evaluates a lambda expression to normal form using β-reduction.
+/// Computes the final result of lambda calculus expressions safely and
+/// efficiently.
 ///
-/// This function repeatedly applies single-step reductions until either
-/// a normal form is reached or the maximum number of steps is exceeded.
-/// Uses normal order evaluation strategy for guaranteed termination when
-/// possible.
+/// The evaluation uses normal order strategy, guarantees termination when a
+/// normal form exists. Results are automatically cleaned up by compressing
+/// nested abstractions into readable multi-level forms.
 ///
 /// # Arguments
-/// * `expr` - The lambda expression to evaluate
-/// * `max_steps` - Maximum number of reduction steps allowed
+/// * `expr` - The lambda expression to fully evaluate
+/// * `max_steps` - Safety limit to prevent infinite computations
 ///
 /// # Returns
-/// * `Ok(normal_form)` - The expression in normal form
-/// * `Err(EvaluationError::ReductionLimitExceeded(_))` - If `max_steps`
-///   exceeded
-/// * `Err(_)` - If an error occurred during reduction
+/// The expression in its final computed form, with abstractions simplified.
+///
+/// # Errors
+/// * `ReductionLimitExceeded` - Expression may be non-terminating or very
+///   complex
+/// * Other errors indicate malformed expressions or internal computation issues
 ///
 /// # Examples
 /// ```
@@ -335,19 +304,17 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
 /// use minilamb::expr::Expr;
 /// use minilamb::engine::evaluate;
 ///
-/// // Evaluate identity function: (λx.x) y → y
+/// // Evaluate function application to get final result
 /// let identity = abs!(1, 1);
-/// let arg = "y"; // Free variable y
-/// let app = app!(identity, arg);
+/// let application = app!(identity, "y");
 ///
-/// let result = evaluate(&app, 100).unwrap();
-/// // After evaluation, the free variable y remains as y
+/// let result = evaluate(&application, 100).unwrap();
 /// assert_eq!(result, Expr::FreeVar("y".to_string()));
-/// ```
 ///
-/// # Errors
-/// Returns `ReductionLimitExceeded` if the expression requires more than
-/// `max_steps` reductions, which may indicate an infinite loop.
+/// // Church numeral arithmetic: 2 + 1 = 3 (conceptual example)
+/// // let sum = app!(plus, church_two, church_one);
+/// // let three = evaluate(&sum, 1000).unwrap();
+/// ```
 pub fn evaluate(expr: &Expr, max_steps: usize) -> Result<Expr> {
     let mut current = expr.clone();
     let mut steps = 0;
@@ -388,14 +355,14 @@ mod tests {
 
     #[test]
     fn test_shift_var_above_cutoff() {
-        // Variables at or above cutoff should be shifted
+        // Variables above cutoff should be shifted
         let expr = 3.into_expr();
         let result = shift(2, 3, &expr).unwrap();
-        assert_eq!(result, 5.into_expr());
+        assert_eq!(result, 3.into_expr()); // 3 is not > 3, so not shifted
 
         let expr = 4.into_expr();
         let result = shift(1, 3, &expr).unwrap();
-        assert_eq!(result, 5.into_expr());
+        assert_eq!(result, 5.into_expr()); // 4 > 3, so shifted by 1
     }
 
     #[test]
@@ -414,36 +381,36 @@ mod tests {
     fn test_shift_underflow_error() {
         // Should error when shifting would cause underflow (result would be zero or
         // negative)
-        let expr = 1.into_expr();
-        let result = shift(-3, 1, &expr);
+        let expr = 2.into_expr();
+        let result = shift(-3, 1, &expr); // 2 > 1, so 2-3 would underflow
         assert!(result.is_err());
 
-        let expr = 3.into_expr();
-        let result = shift(-4, 3, &expr);
+        let expr = 4.into_expr();
+        let result = shift(-4, 3, &expr); // 4 > 3, so 4-4 would be 0
         assert!(result.is_err());
     }
 
     #[test]
     fn test_shift_abs() {
-        // λ.1 with shift(1, 1) should become λ.1 (variable 1 is below cutoff 2)
+        // λ.1 with shift(1, 1) should become λ.1 (variable 1 is not > cutoff 2)
         let expr = abs!(1, 1);
         let result = shift(1, 1, &expr).unwrap();
         assert_eq!(result, abs!(1, 1));
 
-        // λ.2 with shift(2, 1) should become λ.4 (variable 2 is at cutoff 2)
+        // λ.2 with shift(2, 1) should become λ.2 (variable 2 is not > cutoff 2)
         let expr = abs!(1, 2);
         let result = shift(2, 1, &expr).unwrap();
-        assert_eq!(result, abs!(1, 4));
+        assert_eq!(result, abs!(1, 2));
     }
 
     #[test]
     fn test_shift_app() {
-        // (1 2) with shift(1, 2) should become (1 3)
+        // (1 2) with shift(1, 2) should become (1 2) - neither 1 nor 2 > cutoff 2
         let expr = app!(1, 2);
         let result = shift(1, 2, &expr).unwrap();
-        assert_eq!(result, app!(1, 3));
+        assert_eq!(result, app!(1, 2));
 
-        // (2 3) with shift(1, 1) should become (3 4)
+        // (2 3) with shift(1, 1) should become (3 4) - both 2 and 3 > cutoff 1
         let expr = app!(2, 3);
         let result = shift(1, 1, &expr).unwrap();
         assert_eq!(result, app!(3, 4));
@@ -460,12 +427,12 @@ mod tests {
 
     #[test]
     fn test_substitute_exact_match() {
-        // Substituting variable 1 with variable 5 in variable 1 should give variable 6
-        // due to shifting by the substitution index (1) to account for binding depth
+        // Substituting variable 1 with variable 5 in variable 1 should give variable 5
+        // (no additional shifting needed)
         let src = 5.into_expr();
         let tgt = 1.into_expr();
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, 6.into_expr());
+        assert_eq!(result, 5.into_expr());
     }
 
     #[test]
@@ -480,18 +447,18 @@ mod tests {
     #[test]
     fn test_substitute_in_abs() {
         // Test substitution in abstractions
-        // substitute(1, var(3), λ.1) - variable 1 becomes variable 2 after index
-        // adjustment
+        // substitute(1, var(3), λ.1) - variable 1 doesn't match idx+level=2
         let src = 3.into_expr();
         let tgt = abs!(1, 1);
         let result = substitute(1, &src, &tgt).unwrap();
         assert_eq!(result, abs!(1, 1));
 
-        // substitute(1, var(2), λ.2) - the source gets shifted and substituted
+        // substitute(1, var(2), λ.2) - variable 2 matches idx+level=2, substitute with
+        // shifted src
         let src = 2.into_expr();
         let tgt = abs!(1, 2);
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, abs!(1, 5));
+        assert_eq!(result, abs!(1, 3)); // src(2) shifted by level(1) becomes 3
     }
 
     #[test]
@@ -500,23 +467,23 @@ mod tests {
         let src = 5.into_expr();
         let tgt = app!(1, 2);
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, app!(6, 2));
+        assert_eq!(result, app!(5, 2)); // variable 1 replaced with src(5)
 
         let src = 7.into_expr();
         let tgt = app!(3, 2);
         let result = substitute(2, &src, &tgt).unwrap();
-        assert_eq!(result, app!(3, 9));
+        assert_eq!(result, app!(3, 7)); // variable 2 replaced with src(7)
     }
 
     #[test]
     fn test_substitute_complex_expr() {
         // Test substitution in a complex expression: (λ.1) 2
-        // substitute(2, var(9), (λ.1) 2) should give (λ.1) 11 (9 shifted by 2)
+        // substitute(2, var(9), (λ.1) 2) should give (λ.1) 9 (direct replacement)
         let src = 9.into_expr();
         let abs_expr = abs!(1, 1);
         let tgt = app!(abs_expr.clone(), 2);
         let result = substitute(2, &src, &tgt).unwrap();
-        assert_eq!(result, app!(abs_expr, 11));
+        assert_eq!(result, app!(abs_expr, 9));
     }
 
     #[test]
@@ -525,22 +492,21 @@ mod tests {
         let src = 5.into_expr();
         let tgt = abs!(1, abs!(1, 2));
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, abs!(1, abs!(1, 2)));
+        assert_eq!(result, abs!(1, abs!(1, 2))); // var 2 != idx+level1+level2=3
 
-        // substitute(1, var(5), λ.λ.3)
+        // substitute(1, var(5), λ.λ.3) - var 3 matches idx+level1+level2=3
         let src = 5.into_expr();
         let tgt = abs!(1, abs!(1, 3));
         let result = substitute(1, &src, &tgt).unwrap();
-        assert_eq!(result, abs!(1, abs!(1, 10)));
+        assert_eq!(result, abs!(1, abs!(1, 7))); // src(5) shifted by 2 levels becomes 7
     }
 
     #[test]
     fn test_identity_substitution() {
-        // Substituting a variable with itself results in shifting by the substitution
-        // index
+        // Substituting a variable with itself results in the same variable
         let expr = 2.into_expr();
         let result = substitute(2, &2.into_expr(), &expr).unwrap();
-        assert_eq!(result, 4.into_expr()); // var(2) shifted by 2
+        assert_eq!(result, 2.into_expr()); // direct replacement
     }
 
     #[test]
@@ -864,7 +830,7 @@ mod tests {
         // Test simple shift
         let expr = abs!(2, 5);
         let result = shift(1, 1, &expr).unwrap();
-        // Variable 5 should be shifted because 5 >= 1+2=3
+        // Variable 5 should be shifted because 5 > 1+2=3
         let expected = abs!(2, 6);
         assert_eq!(result, expected);
 
@@ -872,9 +838,9 @@ mod tests {
         let src = 10.into_expr();
         let tgt = abs!(1, 2);
         let result = substitute(1, &src, &tgt).unwrap();
-        // Variable 2 inside the 1-level abstraction corresponds to outer var 1
-        // Source gets shifted by 1 (level) to become 11, then by 1 (idx) to become 12
-        let expected = abs!(1, 13); // Actual result
+        // Variable 2 inside the 1-level abstraction matches idx+level=2
+        // Source gets shifted by level(1) to become 11
+        let expected = abs!(1, 11); // Actual result
         assert_eq!(result, expected);
     }
 
@@ -886,15 +852,15 @@ mod tests {
         // Test shift doesn't underflow
         let expr = abs!(1, 2);
         let result = shift(-3, 2, &expr);
-        // This should not cause underflow since variable 2 < cutoff 2+1=3
+        // This should not cause underflow since variable 2 is not > cutoff 2+1=3
         assert!(result.is_ok());
 
         // Test substitute works for real patterns
         let src = 5.into_expr();
-        let tgt = abs!(2, 4); // Variable 4 corresponds to outer variable 2
+        let tgt = abs!(2, 4); // Variable 4 matches idx+level=4
         let result = substitute(2, &src, &tgt).unwrap();
-        // This should work and produce a reasonable result
-        assert_eq!(result, abs!(2, 11)); // Actual result: 5+2+2+2 (source shifted by level then by idx)
+        // Source gets shifted by level(2) to become 7
+        assert_eq!(result, abs!(2, 7));
     }
 
     #[test]
@@ -924,9 +890,9 @@ mod tests {
         let app2 = app!(app1, 4);
 
         let result = reduce_once(&app2).unwrap();
-        // After substitution and shift, arg1 (var 3) becomes var 5 in the abstraction
+        // After substitution and shift, arg1 (var 3) becomes var 4 in the abstraction
         // body
-        let expected = app!(abs!(1, 5), 4);
+        let expected = app!(abs!(1, 4), 4);
         assert_eq!(result, Some(expected));
     }
 
