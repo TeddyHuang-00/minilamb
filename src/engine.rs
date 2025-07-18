@@ -66,7 +66,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
             let func = &exprs[0];
             let first_arg = &exprs[1];
 
-            if let Expr::Abs(level, body) = func.as_ref() {
+            if let Expr::Abs(level, body) = func {
                 // For multi-level abstractions, substitute for the outermost binding
                 // which corresponds to the highest index in the current context
                 let substituted = substitute(*level, first_arg, body)?;
@@ -77,7 +77,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
                 if *level == 1 {
                     // Single abstraction: we're done with this abstraction
                     if exprs.len() > 2 {
-                        let mut new_exprs = vec![Box::new(reduced)];
+                        let mut new_exprs = vec![reduced];
                         new_exprs.extend(exprs[2..].iter().cloned());
                         Some(Expr::App(new_exprs))
                     } else {
@@ -87,7 +87,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
                     // Multi-level abstraction: reduce level by 1 and wrap the reduced body
                     let new_abs = Expr::Abs(level - 1, Box::new(reduced));
                     if exprs.len() > 2 {
-                        let mut new_exprs = vec![Box::new(new_abs)];
+                        let mut new_exprs = vec![new_abs];
                         new_exprs.extend(exprs[2..].iter().cloned());
                         Some(Expr::App(new_exprs))
                     } else {
@@ -97,7 +97,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
             } else {
                 // Try to reduce the function first
                 if let Some(reduced_func) = reduce_once(func)? {
-                    let mut new_exprs = vec![Box::new(reduced_func)];
+                    let mut new_exprs = vec![reduced_func];
                     new_exprs.extend(exprs[1..].iter().cloned());
                     Some(Expr::App(new_exprs))
                 } else {
@@ -105,7 +105,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
                     for (i, arg) in exprs.iter().enumerate().skip(1) {
                         if let Some(reduced_arg) = reduce_once(arg)? {
                             let mut new_exprs = exprs.clone();
-                            new_exprs[i] = Box::new(reduced_arg);
+                            new_exprs[i] = reduced_arg;
                             return Ok(Some(Expr::App(new_exprs)));
                         }
                     }

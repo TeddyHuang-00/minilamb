@@ -21,9 +21,8 @@ pub enum Expr {
     Var(usize),
     /// Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
     Abs(usize, Box<Expr>),
-    #[allow(clippy::vec_box)]
     /// Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2) ... an
-    App(Vec<Box<Expr>>),
+    App(Vec<Expr>),
 }
 
 impl std::fmt::Debug for Expr {
@@ -65,7 +64,7 @@ impl std::fmt::Display for Expr {
                     .iter()
                     .enumerate()
                     .map(|(i, expr)| {
-                        match expr.as_ref() {
+                        match expr {
                             Self::Abs(..) if i < exprs.len() - 1 => format!("({expr})"),
                             // Parenthesize abstractions when not the last argument
                             Self::App(..) if i > 0 => format!("({expr})"),
@@ -127,9 +126,9 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
             Ok(Abs(*level, Box::new(body)))
         }
         App(exprs) => {
-            let shifted_exprs: Result<Vec<Box<Expr>>> = exprs
+            let shifted_exprs: Result<Vec<Expr>> = exprs
                 .iter()
-                .map(|expr| shift(delta, cutoff, expr).map(Box::new))
+                .map(|expr| shift(delta, cutoff, expr))
                 .collect();
             Ok(App(shifted_exprs?))
         }
@@ -190,9 +189,9 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
             Ok(Abs(*level, Box::new(body)))
         }
         App(exprs) => {
-            let substituted_exprs: Result<Vec<Box<Expr>>> = exprs
+            let substituted_exprs: Result<Vec<Expr>> = exprs
                 .iter()
-                .map(|expr| substitute(idx, src, expr).map(Box::new))
+                .map(|expr| substitute(idx, src, expr))
                 .collect();
             Ok(App(substituted_exprs?))
         }
@@ -266,10 +265,7 @@ pub fn compress_abstractions(expr: &Expr) -> Expr {
             }
         }
         App(exprs) => {
-            let compressed_exprs: Vec<Box<Expr>> = exprs
-                .iter()
-                .map(|expr| Box::new(compress_abstractions(expr)))
-                .collect();
+            let compressed_exprs: Vec<Expr> = exprs.iter().map(compress_abstractions).collect();
             App(compressed_exprs)
         }
     }
@@ -374,11 +370,7 @@ fn find_max_binding_depth(expr: &Expr) -> usize {
     match expr {
         Var(_) => 0,
         Abs(level, body) => *level + find_max_binding_depth(body),
-        App(exprs) => exprs
-            .iter()
-            .map(|e| find_max_binding_depth(e))
-            .max()
-            .unwrap_or(0),
+        App(exprs) => exprs.iter().map(find_max_binding_depth).max().unwrap_or(0),
     }
 }
 
@@ -421,7 +413,7 @@ fn apply_free_variable_mapping(
         ),
         App(exprs) => App(exprs
             .iter()
-            .map(|e| Box::new(apply_free_variable_mapping(e, mapping, binding_depth)))
+            .map(|e| apply_free_variable_mapping(e, mapping, binding_depth))
             .collect()),
     }
 }
@@ -477,11 +469,10 @@ macro_rules! abs {
 ///
 /// // Create application of variables: 1 2 3
 /// let expr = app!(1, 2, 3);
-/// assert_eq!(expr, Expr::App(vec![
-///     Box::new(Expr::Var(1)),
-///     Box::new(Expr::Var(2)),
-///     Box::new(Expr::Var(3))
-/// ]));
+/// assert_eq!(
+///     expr,
+///     Expr::App(vec![Expr::Var(1), Expr::Var(2), Expr::Var(3)])
+/// );
 ///
 /// // Mix with abstractions
 /// let expr = app!(abs!(1, 1), 2);
@@ -489,7 +480,7 @@ macro_rules! abs {
 #[macro_export]
 macro_rules! app {
     ($($arg:expr),+ $(,)?) => {
-        $crate::expr::Expr::App(vec![$(Box::new($crate::expr::IntoExpr::into_expr($arg))),+])
+        $crate::expr::Expr::App(vec![$($crate::expr::IntoExpr::into_expr($arg)),+])
     };
 }
 
@@ -529,7 +520,7 @@ mod tests {
 
         #[must_use]
         pub fn app(func: Self, arg: Self) -> Self {
-            App(vec![Box::new(func), Box::new(arg)])
+            App(vec![func, arg])
         }
 
         /// Creates a multi-argument application
@@ -542,7 +533,7 @@ mod tests {
                 exprs.len() >= 2,
                 "Application must have at least 2 expressions (function + argument)"
             );
-            App(exprs.into_iter().map(Box::new).collect())
+            App(exprs)
         }
     }
 
@@ -915,7 +906,7 @@ mod tests {
         let expr = abs!(2, body.clone());
         assert_eq!(expr, Abs(2, Box::new(body)));
 
-        let nested = App(vec![Box::new(Var(1)), Box::new(Var(2))]);
+        let nested = App(vec![Var(1), Var(2)]);
         let expr = abs!(1, nested.clone());
         assert_eq!(expr, Abs(1, Box::new(nested)));
     }
@@ -936,11 +927,11 @@ mod tests {
     fn test_app_macro_with_usize() {
         // Test app! macro with usize arguments
         let expr = app!(1, 2);
-        let expected = App(vec![Box::new(Var(1)), Box::new(Var(2))]);
+        let expected = App(vec![Var(1), Var(2)]);
         assert_eq!(expr, expected);
 
         let expr = app!(1, 2, 3);
-        let expected = App(vec![Box::new(Var(1)), Box::new(Var(2)), Box::new(Var(3))]);
+        let expected = App(vec![Var(1), Var(2), Var(3)]);
         assert_eq!(expr, expected);
     }
 
@@ -950,7 +941,7 @@ mod tests {
         let func = Abs(1, Box::new(Var(1)));
         let arg = Var(2);
         let expr = app!(func.clone(), arg.clone());
-        let expected = App(vec![Box::new(func), Box::new(arg)]);
+        let expected = App(vec![func, arg]);
         assert_eq!(expr, expected);
     }
 
@@ -959,15 +950,11 @@ mod tests {
         // Test app! macro with mixed usize and Expr arguments
         let abs_expr = Abs(1, Box::new(Var(1)));
         let expr = app!(abs_expr.clone(), 2, 3);
-        let expected = App(vec![
-            Box::new(abs_expr.clone()),
-            Box::new(Var(2)),
-            Box::new(Var(3)),
-        ]);
+        let expected = App(vec![abs_expr.clone(), Var(2), Var(3)]);
         assert_eq!(expr, expected);
 
         let expr = app!(1, abs_expr.clone(), 3);
-        let expected = App(vec![Box::new(Var(1)), Box::new(abs_expr), Box::new(Var(3))]);
+        let expected = App(vec![Var(1), abs_expr, Var(3)]);
         assert_eq!(expr, expected);
     }
 
@@ -975,14 +962,11 @@ mod tests {
     fn test_mixed_macro_nesting() {
         // Test complex nesting of abs! and app! macros
         let expr = abs!(2, app!(1, 2));
-        let expected = Abs(2, Box::new(App(vec![Box::new(Var(1)), Box::new(Var(2))])));
+        let expected = Abs(2, Box::new(App(vec![Var(1), Var(2)])));
         assert_eq!(expr, expected);
 
         let expr = app!(abs!(1, 1), abs!(1, 2));
-        let expected = App(vec![
-            Box::new(Abs(1, Box::new(Var(1)))),
-            Box::new(Abs(1, Box::new(Var(2)))),
-        ]);
+        let expected = App(vec![Abs(1, Box::new(Var(1))), Abs(1, Box::new(Var(2)))]);
         assert_eq!(expr, expected);
     }
 
@@ -1198,11 +1182,8 @@ mod tests {
         let expected = Abs(
             2,
             Box::new(App(vec![
-                Box::new(Var(2)),
-                Box::new(App(vec![
-                    Box::new(Abs(1, Box::new(Var(1)))),
-                    Box::new(Var(3)),
-                ])),
+                Var(2),
+                App(vec![Abs(1, Box::new(Var(1))), Var(3)]),
             ])),
         );
         assert_eq!(expr, expected);
@@ -1212,7 +1193,7 @@ mod tests {
     fn test_app_macro_trailing_comma() {
         // Test that trailing commas work in app! macro
         let expr = app!(1, 2, 3,);
-        let expected = App(vec![Box::new(Var(1)), Box::new(Var(2)), Box::new(Var(3))]);
+        let expected = App(vec![Var(1), Var(2), Var(3)]);
         assert_eq!(expr, expected);
     }
 
@@ -1248,9 +1229,9 @@ mod tests {
 
         // Verbose way
         let verbose = App(vec![
-            Box::new(Abs(2, Box::new(Var(1)))),
-            Box::new(Var(3)),
-            Box::new(App(vec![Box::new(Var(4)), Box::new(Var(5))])),
+            Abs(2, Box::new(Var(1))),
+            Var(3),
+            App(vec![Var(4), Var(5)]),
         ]);
 
         // Macro way

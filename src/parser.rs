@@ -230,7 +230,7 @@ impl Parser {
             Ok(exprs.into_iter().next().unwrap_or_else(|| unreachable!()))
         } else {
             // Create compressed application
-            Ok(Expr::App(exprs.into_iter().map(Box::new).collect()))
+            Ok(Expr::App(exprs.into_iter().collect()))
         }
     }
 
