@@ -46,12 +46,12 @@ pub enum EvaluationError {
 ///
 /// // (λx.x) y reduces to y (where y is a free variable)
 /// let identity = abs!(1, 1);
-/// let arg = 2; // Free variable y
+/// let arg = "y"; // Free variable y
 /// let app = app!(identity, arg);
 ///
 /// let result = reduce_once(&app).unwrap();
-/// // After substitution and shift, Var(2) stays as Var(2) in 1-based indexing
-/// assert_eq!(result, Some(Expr::Var(2)));
+/// // After substitution and shift, the free variable y remains as y
+/// assert_eq!(result, Some(Expr::FreeVar("y".to_string())));
 /// ```
 pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
     let result = match expr {
@@ -117,7 +117,7 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
             // Try to reduce the body
             reduce_once(body)?.map(|reduced_body| Expr::Abs(*level, Box::new(reduced_body)))
         }
-        Expr::Var(_) => None, // Variables cannot be reduced
+        Expr::BoundVar(_) | Expr::FreeVar(_) => None, // Variables cannot be reduced
     };
 
     Ok(result)
@@ -148,12 +148,12 @@ pub fn reduce_once(expr: &Expr) -> Result<Option<Expr>> {
 ///
 /// // Evaluate identity function: (λx.x) y → y
 /// let identity = abs!(1, 1);
-/// let arg = 2; // Free variable y
+/// let arg = "y"; // Free variable y
 /// let app = app!(identity, arg);
 ///
 /// let result = evaluate(&app, 100).unwrap();
-/// // After evaluation and normalization, free variable 2 becomes 1
-/// assert_eq!(result, Expr::Var(1));
+/// // After evaluation, the free variable y remains as y
+/// assert_eq!(result, Expr::FreeVar("y".to_string()));
 /// ```
 ///
 /// # Errors
@@ -253,12 +253,12 @@ mod tests {
     #[test]
     fn test_evaluate_identity() {
         // (λx.x) y → y
-        // After evaluation, free variable y (var 2) gets shifted down to var(1)
+        // After evaluation, free variable y remains as y
         let identity = abs!(1, 1);
-        let app = app!(identity, 2);
+        let app = app!(identity, "y");
 
         let result = evaluate(&app, 100).unwrap();
-        assert_eq!(result, Expr::var(1)); // Free variable 2 normalized to 1
+        assert_eq!(result, Expr::FreeVar("y".to_string()));
     }
 
     #[test]
@@ -266,12 +266,12 @@ mod tests {
         // TRUE = λt.λf.t
         // TRUE x y → x
         let church_true = abs!(1, abs!(1, 2)); // λλ.2 (return first argument)
-        let app1 = app!(church_true, 2);
-        let app2 = app!(app1, 3);
+        let app1 = app!(church_true, "x");
+        let app2 = app!(app1, "y");
 
         let result = evaluate(&app2, 100).unwrap();
-        // TRUE x y → x. With normalization: x=2→1, y=3→2, result=1
-        assert_eq!(result, Expr::var(1));
+        // TRUE x y → x
+        assert_eq!(result, Expr::FreeVar("x".to_string()));
     }
 
     #[test]
@@ -279,13 +279,12 @@ mod tests {
         // FALSE = λt.λf.f
         // FALSE x y → y
         // After evaluation, the second argument gets shifted down
-        let church_false = abs!(1, abs!(1, 1)); // λλ.1 (return second argument)
-        let app1 = app!(church_false, 2);
-        let app2 = app!(app1, 3);
+        let church_false = abs!(2, 1); // λλ.1 (return second argument)
+        let expr = app!(church_false, "x", "y");
 
-        let result = evaluate(&app2, 100).unwrap();
+        let result = evaluate(&expr, 100).unwrap();
         // FALSE x y → y. With normalization and evaluation order, result=1
-        assert_eq!(result, Expr::var(1));
+        assert_eq!(result, Expr::FreeVar("y".into()));
     }
 
     #[test]
@@ -328,7 +327,10 @@ mod tests {
         // The exact result depends on the complex reduction sequence
         // Let's just check that it doesn't error and produces some result
         match result {
-            Expr::Abs(..) | Expr::Var(_) | Expr::App(..) => (), // Accept any valid result type
+            Expr::Abs(..) | Expr::BoundVar(_) | Expr::FreeVar(_) | Expr::App(..) => (), /* Accept
+                                                                                         * any
+                                                                                         * valid result
+                                                                                         * type */
         }
     }
 
@@ -367,32 +369,31 @@ mod tests {
     fn test_multi_argument_application_evaluation() {
         // Test that multi-argument applications evaluate correctly
         // With multi-level abstractions, each application reduces the level by 1
-        // (λλλ.3) a b c → (λλ.3) b c → (λ.3) c → 3
-        let expr = app!(abs!(3, 3), 5, 6, 7);
-
+        // (λλλ.3) a b c → (λλ.a) b c → (λ.a) c → a
+        let expr = app!(abs!(3, 3), "a", "b", "c");
         let result = evaluate(&expr, 100).unwrap();
-        // (λλλ.3) a b c → a. With normalization: 5→1, 6→2, 7→3, result=1
-        assert_eq!(result, Expr::var(1));
+
+        assert_eq!(result, Expr::FreeVar("a".into()));
     }
 
     #[test]
     fn test_multi_argument_partial_application() {
         // Test partial application of multi-argument functions
         // (λλ.2) a → λ.a
-        let expr = app!(abs!(2, 2), 5);
+        let expr = app!(abs!(2, 2), "a");
 
         let result = evaluate(&expr, 100).unwrap();
-        // (λλ.2) a → λ.a. With normalization: 5→1, result=λ.1
-        assert_eq!(result, abs!(1, 2)); // λ.2 (free variable normalized to start after binding)
+        // (λλ.2) a → λ.a
+        assert_eq!(result, abs!(1, "a"));
     }
 
     #[test]
     fn test_multi_argument_identity_chain() {
         // Test chaining identity functions: (λx.x) (λy.y) z → (λy.y) z → z
-        let expr = app!(abs!(1, 1), abs!(1, 1), 3);
+        let expr = app!(abs!(1, 1), abs!(1, 1), "z");
 
         let result = evaluate(&expr, 100).unwrap();
-        assert_eq!(result, Expr::var(1)); // z normalized from 3→1
+        assert_eq!(result, Expr::FreeVar("z".to_string()));
     }
 
     #[test]
@@ -407,7 +408,7 @@ mod tests {
         if let Ok(expr) = result {
             // Accept any valid result
             match expr {
-                Expr::Var(_) | Expr::Abs(..) | Expr::App(..) => (),
+                Expr::BoundVar(_) | Expr::FreeVar(_) | Expr::Abs(..) | Expr::App(..) => (),
             }
         } else {
             // Accept errors for this complex case as the semantics

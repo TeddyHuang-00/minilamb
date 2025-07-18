@@ -1,3 +1,5 @@
+use anyhow::Result;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     /// λ, \, /, |

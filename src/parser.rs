@@ -1,3 +1,4 @@
+use anyhow::Result;
 use thiserror::Error;
 
 use crate::{
@@ -19,8 +20,7 @@ pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
     mode: ParseMode,
-    context: Vec<String>,   // Variable binding context for De Bruijn conversion
-    free_vars: Vec<String>, // Free variable names for consistent indexing
+    context: Vec<String>, // Variable binding context for De Bruijn conversion
 }
 
 #[derive(Debug, Clone, Error)]
@@ -45,7 +45,6 @@ impl Parser {
             current: 0,
             mode: ParseMode::Auto,
             context: Vec::new(),
-            free_vars: Vec::new(),
         }
     }
 
@@ -80,7 +79,11 @@ impl Parser {
         })?;
 
         let mut parser = Self::new(tokens);
-        parser.mode = mode;
+        if matches!(mode, ParseMode::Auto) {
+            parser.detect_mode()?;
+        } else {
+            parser.mode = mode;
+        }
         let expr = parser.parse_expression()?;
         Ok(simplify(&expr))
     }
@@ -264,8 +267,16 @@ impl Parser {
                         position: self.current,
                     });
                 }
-                // Use usize directly (already validated by lexer)
-                Ok(Expr::Var(index))
+                // For De Bruijn mode, determine if this is a bound or free variable
+                let binding_depth = self.context.len();
+                if index <= binding_depth {
+                    // This is a bound variable
+                    Ok(Expr::BoundVar(index))
+                } else {
+                    // This is a free variable - convert to consistent naming
+                    let free_var_name = Self::get_free_var_name(binding_depth, index);
+                    Ok(Expr::FreeVar(free_var_name))
+                }
             }
             Some(Token::Lambda) => {
                 // Nested abstraction
@@ -284,28 +295,45 @@ impl Parser {
         }
     }
 
-    fn resolve_variable(&mut self, name: &str) -> Expr {
+    fn resolve_variable(&self, name: &str) -> Expr {
         // Convert variable name to De Bruijn index (1-based)
         for (i, var) in self.context.iter().rev().enumerate() {
             if var == name {
-                // Convert 0-based context index to 1-based usize
+                // Convert 0-based context index to 1-based bound variable
                 let index = i + 1;
-                return Expr::Var(index);
+                return Expr::BoundVar(index);
             }
         }
 
         // Variable not found in context - treat as free variable
-        // Check if we've seen this free variable before
-        if let Some(free_idx) = self.free_vars.iter().position(|v| v == name) {
-            // Use existing free variable index
-            let index = self.context.len() + free_idx + 1;
-            return Expr::Var(index);
-        }
+        Expr::FreeVar(name.to_string())
+    }
 
-        // New free variable - add to the list
-        self.free_vars.push(name.to_string());
-        let index = self.context.len() + self.free_vars.len();
-        Expr::Var(index)
+    fn get_free_var_name(binding_depth: usize, index: usize) -> String {
+        // Calculate the effective index for the free variable
+        // Since index > binding_depth, this will always be positive
+        let free_var_index = index - binding_depth - 1;
+
+        // Generate name: a-z, aa-az, ba-bz, etc.
+        Self::index_to_name(free_var_index)
+    }
+
+    fn index_to_name(index: usize) -> String {
+        // Convert index to a-z, aa-az, ba-bz, etc. format
+        let alphabet_size = 26;
+        let mut index = index;
+        let mut name = vec![];
+        loop {
+            name.push(char::from(
+                b'a' + u8::try_from(index % alphabet_size).unwrap_or(b'z' - b'a'),
+            ));
+            index /= alphabet_size;
+            if index == 0 {
+                break;
+            }
+        }
+        name.reverse();
+        name.into_iter().collect()
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -424,16 +452,15 @@ mod tests {
         let result = Parser::parse("λx.y");
         assert!(result.is_ok());
         let expr = result.unwrap();
-        // y should be treated as a free variable with index 2 (beyond the binding
-        // context of x)
-        assert_eq!(expr, abs!(1, 2));
+        // y should be treated as a free variable with name "y"
+        assert_eq!(expr, abs!(1, "y"));
 
         // Test multiple free variables
         let result = Parser::parse("λx.λy.z w");
         assert!(result.is_ok());
         let expr = result.unwrap();
-        // z should be index 3, w should be index 4 (beyond binding context of x, y)
-        assert_eq!(expr, abs!(2, app!(3, 4)));
+        // z and w should be treated as free variables with names "z" and "w"
+        assert_eq!(expr, abs!(2, app!("z", "w")));
     }
 
     #[test]

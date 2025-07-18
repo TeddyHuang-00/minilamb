@@ -1,24 +1,26 @@
-use std::collections::{HashMap, HashSet};
-
 use anyhow::{Result, bail};
 
-/// Lambda calculus expression (using De Bruijn indices)
+/// Lambda calculus expression with explicit bound/free variable distinction
 ///
 /// This enum represents expressions in the untyped lambda calculus:
-/// - `Var(usize)`: Variable, using 1-based De Bruijn index (must be > 0)
+/// - `BoundVar(usize)`: Bound variable using 1-based De Bruijn index (must be >
+///   0)
+/// - `FreeVar(String)`: Free variable with name
 /// - `Abs(usize, Box<Expr>)`: Lambda abstraction (level, function body)
-/// - `App(Vec<Box<Expr>>)`: Application (function call with multiple arguments)
+/// - `App(Vec<Expr>)`: Application (function call with multiple arguments)
 ///
 /// # Examples
 /// ```
 /// use minilamb::{abs, app};
-/// let id = abs!(1, 1); // λ.1
-/// let app_expr = app!(id.clone(), 2); // (λ.1) 2
+/// let id = abs!(1, 1); // λ.1 (bound variable)
+/// let app_expr = app!(id.clone(), "x"); // (λ.1) x (free variable)
 /// ```
 #[derive(Hash, Clone, PartialEq, Eq)]
 pub enum Expr {
-    /// De Bruijn index variable (1-based, must be > 0)
-    Var(usize),
+    /// Bound variable using 1-based De Bruijn index (must be > 0)
+    BoundVar(usize),
+    /// Named free variable
+    FreeVar(String),
     /// Lambda abstraction (level, body) - λλλ.body is Abs(3, body)
     Abs(usize, Box<Expr>),
     /// Application (f a1 a2 ... an) where n >= 1, represents ((f a1) a2) ... an
@@ -28,10 +30,11 @@ pub enum Expr {
 impl std::fmt::Debug for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Var(n) => {
+            Self::BoundVar(n) => {
                 assert!(*n > 0, "Variable index must be positive");
                 write!(f, "{n}")
             }
+            Self::FreeVar(name) => write!(f, "{name}"),
             Self::Abs(level, body) => {
                 let lambdas = "λ".repeat(*level);
                 write!(f, "({lambdas}.{body:?})")
@@ -47,10 +50,11 @@ impl std::fmt::Debug for Expr {
 impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Var(n) => {
+            Self::BoundVar(n) => {
                 assert!(*n > 0, "Variable index must be positive");
                 write!(f, "{n}")
             }
+            Self::FreeVar(name) => write!(f, "{name}"),
             Self::Abs(level, body) => {
                 let lambdas = "λ".repeat(*level);
                 write!(f, "{lambdas}.{body}")
@@ -98,29 +102,30 @@ impl std::fmt::Display for Expr {
 /// # Examples
 /// ```
 /// use minilamb::expr::{Expr, shift};
-/// let expr = Expr::Var(3);
+/// let expr = Expr::BoundVar(3);
 /// let shifted = shift(1, 2, &expr).unwrap();
-/// assert_eq!(shifted, Expr::Var(4));
+/// assert_eq!(shifted, Expr::BoundVar(4));
 /// ```
 pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
-    use Expr::{Abs, App, Var};
+    use Expr::{Abs, App, BoundVar, FreeVar};
     match expr {
-        Var(k) => {
+        BoundVar(k) => {
             if *k == 0 {
                 bail!("Invalid variable index: 0 (must be positive)");
             }
             if *k >= cutoff {
                 let new_val = k.checked_add_signed(delta);
                 match new_val {
-                    Some(val) if val > 0 => Ok(Var(val)),
+                    Some(val) if val > 0 => Ok(BoundVar(val)),
                     _ => bail!(
                         "Variable index out of bounds: {k} with delta {delta} and cutoff {cutoff}"
                     ),
                 }
             } else {
-                Ok(Var(*k))
+                Ok(BoundVar(*k))
             }
         }
+        FreeVar(name) => Ok(FreeVar(name.clone())),
         Abs(level, body) => {
             let body = shift(delta, cutoff + level, body)?;
             Ok(Abs(*level, Box::new(body)))
@@ -161,15 +166,15 @@ pub fn shift(delta: isize, cutoff: usize, expr: &Expr) -> Result<Expr> {
 /// # Examples
 /// ```
 /// use minilamb::expr::{Expr, substitute};
-/// let src = Expr::Var(5);
-/// let tgt = Expr::Var(1);
+/// let src = Expr::BoundVar(5);
+/// let tgt = Expr::BoundVar(1);
 /// let result = substitute(1, &src, &tgt).unwrap();
-/// assert_eq!(result, Expr::Var(6)); // src shifted by idx (1)
+/// assert_eq!(result, Expr::BoundVar(6)); // src shifted by idx (1)
 /// ```
 pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
-    use Expr::{Abs, App, Var};
+    use Expr::{Abs, App, BoundVar, FreeVar};
     match tgt {
-        Var(k) => {
+        BoundVar(k) => {
             if *k == 0 {
                 bail!("Invalid variable index: 0 (must be positive)");
             }
@@ -180,9 +185,10 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
                 // in compressed multi-level abstractions (e.g., λλλ.3).
                 shift(idx.try_into()?, 1, src)
             } else {
-                Ok(Var(*k))
+                Ok(BoundVar(*k))
             }
         }
+        FreeVar(name) => Ok(FreeVar(name.clone())),
         Abs(level, body) => {
             let src = shift((*level).try_into()?, 1, src)?;
             let body = substitute(idx + level, &src, body)?;
@@ -224,18 +230,15 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
 /// let simplified = simplify(&nested);
 /// assert_eq!(simplified, abs!(2, 1));
 ///
-/// // Free variable normalization: λ.5 becomes λ.2
+/// // Variables remain unchanged: λ.5 stays λ.5
 /// let expr = abs!(1, 5);
 /// let simplified = simplify(&expr);
-/// assert_eq!(simplified, abs!(1, 2));
+/// assert_eq!(simplified, abs!(1, 5));
 /// ```
 #[must_use]
 pub fn simplify(expr: &Expr) -> Expr {
-    // First, do abstraction compression
-    let compressed = compress_abstractions(expr);
-
-    // Then, normalize free variables
-    normalize_free_variables(&compressed)
+    // do abstraction compression
+    compress_abstractions(expr)
 }
 
 /// Compresses consecutive abstractions in an expression.
@@ -250,9 +253,10 @@ pub fn simplify(expr: &Expr) -> Expr {
 /// Returns the expression with consecutive abstractions compressed.
 #[must_use]
 pub fn compress_abstractions(expr: &Expr) -> Expr {
-    use Expr::{Abs, App, Var};
+    use Expr::{Abs, App, BoundVar, FreeVar};
     match expr {
-        Var(k) => Var(*k),
+        BoundVar(k) => BoundVar(*k),
+        FreeVar(name) => FreeVar(name.clone()),
         Abs(level, body) => {
             let compressed_body = compress_abstractions(body);
 
@@ -271,157 +275,10 @@ pub fn compress_abstractions(expr: &Expr) -> Expr {
     }
 }
 
-/// Normalizes free variables in an expression to use consecutive indices.
-///
-/// Free variables are renumbered to start from the first available index after
-/// all bound variables, using consecutive integers.
-///
-/// # Arguments
-/// * `expr` - The expression to normalize
-///
-/// # Returns
-/// Returns the expression with normalized free variable indices.
-///
-/// # Examples
-/// ```
-/// use minilamb::{abs, expr::normalize_free_variables, expr::IntoExpr};
-///
-/// // Standalone free variable: 5 becomes 1
-/// let expr = 5_usize.into_expr();
-/// let normalized = normalize_free_variables(&expr);
-/// assert_eq!(normalized, 1_usize.into_expr());
-///
-/// // With abstraction: λ.5 becomes λ.2
-/// let expr = abs!(1, 5);
-/// let normalized = normalize_free_variables(&expr);
-/// assert_eq!(normalized, abs!(1, 2));
-/// ```
-#[must_use]
-pub fn normalize_free_variables(expr: &Expr) -> Expr {
-    // Collect all free variables with their binding contexts
-    let free_vars = collect_free_variables(expr, 0);
-
-    if free_vars.is_empty() {
-        // No free variables to normalize
-        return expr.clone();
-    }
-
-    // Find the maximum binding depth in the expression
-    let max_binding_depth = find_max_binding_depth(expr);
-
-    // Create mapping from old indices to new consecutive indices
-    let mut unique_free_vars: Vec<usize> = free_vars.into_iter().collect();
-    unique_free_vars.sort_unstable();
-    unique_free_vars.dedup();
-
-    let mapping: HashMap<usize, usize> = unique_free_vars
-        .into_iter()
-        .enumerate()
-        .map(|(i, old_index)| (old_index, max_binding_depth + i + 1))
-        .collect();
-
-    // Apply the mapping
-    apply_free_variable_mapping(expr, &mapping, 0)
-}
-
-/// Collects all free variables in an expression.
-///
-/// A variable is considered free if its De Bruijn index is greater than the
-/// current binding depth (i.e., it's not bound by any enclosing abstraction).
-///
-/// # Arguments
-/// * `expr` - The expression to analyze
-/// * `binding_depth` - The current binding depth (number of enclosing
-///   abstractions)
-///
-/// # Returns
-/// Returns a set of all free variable indices in the expression.
-fn collect_free_variables(expr: &Expr, binding_depth: usize) -> HashSet<usize> {
-    use Expr::{Abs, App, Var};
-    match expr {
-        Var(k) => {
-            if *k > binding_depth {
-                // This is a free variable
-                std::iter::once(*k).collect()
-            } else {
-                HashSet::new()
-            }
-        }
-        Abs(level, body) => collect_free_variables(body, binding_depth + level),
-        App(exprs) => exprs
-            .iter()
-            .flat_map(|e| collect_free_variables(e, binding_depth))
-            .collect(),
-    }
-}
-
-/// Finds the maximum binding depth in an expression.
-///
-/// This determines how many variable indices are reserved for bound variables,
-/// which helps determine where free variable indices should start.
-///
-/// # Arguments
-/// * `expr` - The expression to analyze
-///
-/// # Returns
-/// Returns the maximum binding depth in the expression.
-fn find_max_binding_depth(expr: &Expr) -> usize {
-    use Expr::{Abs, App, Var};
-    match expr {
-        Var(_) => 0,
-        Abs(level, body) => *level + find_max_binding_depth(body),
-        App(exprs) => exprs.iter().map(find_max_binding_depth).max().unwrap_or(0),
-    }
-}
-
-/// Applies a mapping to replace free variables with their normalized indices.
-///
-/// # Arguments
-/// * `expr` - The expression to transform
-/// * `mapping` - The mapping from old indices to new indices
-/// * `binding_depth` - The current binding depth
-///
-/// # Returns
-/// Returns the expression with free variables replaced according to the
-/// mapping.
-fn apply_free_variable_mapping(
-    expr: &Expr,
-    mapping: &HashMap<usize, usize>,
-    binding_depth: usize,
-) -> Expr {
-    use Expr::{Abs, App, Var};
-    match expr {
-        Var(k) => {
-            if *k > binding_depth {
-                // This is a free variable, apply mapping
-                if let Some(&new_k) = mapping.get(k) {
-                    Var(new_k)
-                } else {
-                    Var(*k) // Shouldn't happen if mapping is complete
-                }
-            } else {
-                Var(*k) // Bound variable, keep as is
-            }
-        }
-        Abs(level, body) => Abs(
-            *level,
-            Box::new(apply_free_variable_mapping(
-                body,
-                mapping,
-                binding_depth + level,
-            )),
-        ),
-        App(exprs) => App(exprs
-            .iter()
-            .map(|e| apply_free_variable_mapping(e, mapping, binding_depth))
-            .collect()),
-    }
-}
-
 /// Trait for converting values into `Expr` for use in macros.
 ///
-/// This trait allows macros to accept both `usize` (converted to `Var`) and
-/// `Expr` values seamlessly.
+/// This trait allows macros to accept both `usize` (converted to `BoundVar`)
+/// and `Expr` values seamlessly.
 pub trait IntoExpr {
     /// Convert the value into an `Expr`.
     fn into_expr(self) -> Expr;
@@ -430,7 +287,13 @@ pub trait IntoExpr {
 impl IntoExpr for usize {
     fn into_expr(self) -> Expr {
         assert!(self > 0, "Variable index must be positive");
-        Expr::Var(self)
+        Expr::BoundVar(self)
+    }
+}
+
+impl IntoExpr for &str {
+    fn into_expr(self) -> Expr {
+        Expr::FreeVar(self.into())
     }
 }
 
@@ -448,7 +311,7 @@ impl IntoExpr for Expr {
 ///
 /// // Create λλλ.3 (abstraction level 3, variable 3)
 /// let expr = abs!(3, 3);
-/// assert_eq!(expr, Expr::Abs(3, Box::new(Expr::Var(3))));
+/// assert_eq!(expr, Expr::Abs(3, Box::new(Expr::BoundVar(3))));
 ///
 /// // Mix with other expressions
 /// let expr = abs!(1, abs!(1, 1));
@@ -471,11 +334,11 @@ macro_rules! abs {
 /// let expr = app!(1, 2, 3);
 /// assert_eq!(
 ///     expr,
-///     Expr::App(vec![Expr::Var(1), Expr::Var(2), Expr::Var(3)])
+///     Expr::App(vec![Expr::BoundVar(1), Expr::BoundVar(2), Expr::BoundVar(3)])
 /// );
 ///
-/// // Mix with abstractions
-/// let expr = app!(abs!(1, 1), 2);
+/// // Mix with abstractions and free variables
+/// let expr = app!(abs!(1, 1), "x");
 /// ```
 #[macro_export]
 macro_rules! app {
@@ -493,14 +356,14 @@ mod tests {
 
     /// Helper function for testing
     impl Expr {
-        /// Creates a variable with a De Bruijn index.
+        /// Creates a bound variable with a De Bruijn index.
         ///
         /// # Panics
         /// Panics if `index` is 0, since De Bruijn indices are 1-based.
         #[must_use]
         pub fn var(index: usize) -> Self {
             assert!(index > 0, "Variable index must be positive");
-            Var(index)
+            BoundVar(index)
         }
 
         #[must_use]
@@ -539,11 +402,14 @@ mod tests {
 
     #[test]
     fn test_var_display() {
-        let expr = 1.into_expr();
+        let expr = BoundVar(1);
         assert_eq!(expr.to_string(), "1");
 
-        let expr = 2.into_expr();
+        let expr = BoundVar(2);
         assert_eq!(expr.to_string(), "2");
+
+        let expr = FreeVar("x".into());
+        assert_eq!(expr.to_string(), "x");
     }
 
     #[test]
@@ -553,6 +419,9 @@ mod tests {
 
         let expr = abs!(1, 2);
         assert_eq!(expr.to_string(), "λ.2");
+
+        let expr = abs!(1, "x");
+        assert_eq!(expr.to_string(), "λ.x");
     }
 
     #[test]
@@ -562,6 +431,9 @@ mod tests {
 
         let expr = app!(3, 4);
         assert_eq!(expr.to_string(), "3 4");
+
+        let expr = app!("f", "x");
+        assert_eq!(expr.to_string(), "f x");
     }
 
     #[test]
@@ -780,14 +652,14 @@ mod tests {
 
     #[test]
     fn test_simplify_variable() {
-        // Bound variables should remain unchanged, free variables should be normalized
+        // Bound variables should remain unchanged
         let expr = 1.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, 1.into_expr()); // Free variable normalized to 1
+        assert_eq!(simplified, 1.into_expr());
 
         let expr = 5.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, 1.into_expr()); // Free variable normalized to 1
+        assert_eq!(simplified, 5.into_expr());
     }
 
     #[test]
@@ -872,10 +744,10 @@ mod tests {
         let simplified = simplify(&expr);
         assert_eq!(simplified, expr);
 
-        // Free variables get normalized: (λλ.1) 2 → (λλ.1) 3 (2 is free, becomes 3)
+        // Variables remain unchanged: (λλ.1) 2 → (λλ.1) 2
         let expr = app!(abs!(2, 1), 2);
         let simplified = simplify(&expr);
-        assert_eq!(simplified, app!(abs!(2, 1), 3));
+        assert_eq!(simplified, app!(abs!(2, 1), 2));
     }
 
     #[test]
@@ -893,20 +765,20 @@ mod tests {
     fn test_abs_macro_with_usize() {
         // Test abs! macro with usize arguments
         let expr = abs!(1, 1);
-        assert_eq!(expr, Abs(1, Box::new(Var(1))));
+        assert_eq!(expr, Abs(1, Box::new(BoundVar(1))));
 
         let expr = abs!(3, 2);
-        assert_eq!(expr, Abs(3, Box::new(Var(2))));
+        assert_eq!(expr, Abs(3, Box::new(BoundVar(2))));
     }
 
     #[test]
     fn test_abs_macro_with_expr() {
         // Test abs! macro with Expr arguments
-        let body = Var(1);
+        let body = BoundVar(1);
         let expr = abs!(2, body.clone());
         assert_eq!(expr, Abs(2, Box::new(body)));
 
-        let nested = App(vec![Var(1), Var(2)]);
+        let nested = App(vec![BoundVar(1), BoundVar(2)]);
         let expr = abs!(1, nested.clone());
         assert_eq!(expr, Abs(1, Box::new(nested)));
     }
@@ -915,11 +787,11 @@ mod tests {
     fn test_abs_macro_nested() {
         // Test nested abs! macros
         let expr = abs!(1, abs!(1, 1));
-        let expected = Abs(1, Box::new(Abs(1, Box::new(Var(1)))));
+        let expected = Abs(1, Box::new(Abs(1, Box::new(BoundVar(1)))));
         assert_eq!(expr, expected);
 
         let expr = abs!(2, abs!(1, 3));
-        let expected = Abs(2, Box::new(Abs(1, Box::new(Var(3)))));
+        let expected = Abs(2, Box::new(Abs(1, Box::new(BoundVar(3)))));
         assert_eq!(expr, expected);
     }
 
@@ -927,19 +799,19 @@ mod tests {
     fn test_app_macro_with_usize() {
         // Test app! macro with usize arguments
         let expr = app!(1, 2);
-        let expected = App(vec![Var(1), Var(2)]);
+        let expected = App(vec![BoundVar(1), BoundVar(2)]);
         assert_eq!(expr, expected);
 
         let expr = app!(1, 2, 3);
-        let expected = App(vec![Var(1), Var(2), Var(3)]);
+        let expected = App(vec![BoundVar(1), BoundVar(2), BoundVar(3)]);
         assert_eq!(expr, expected);
     }
 
     #[test]
     fn test_app_macro_with_expr() {
         // Test app! macro with Expr arguments
-        let func = Abs(1, Box::new(Var(1)));
-        let arg = Var(2);
+        let func = Abs(1, Box::new(BoundVar(1)));
+        let arg = BoundVar(2);
         let expr = app!(func.clone(), arg.clone());
         let expected = App(vec![func, arg]);
         assert_eq!(expr, expected);
@@ -948,13 +820,13 @@ mod tests {
     #[test]
     fn test_app_macro_mixed_args() {
         // Test app! macro with mixed usize and Expr arguments
-        let abs_expr = Abs(1, Box::new(Var(1)));
+        let abs_expr = Abs(1, Box::new(BoundVar(1)));
         let expr = app!(abs_expr.clone(), 2, 3);
-        let expected = App(vec![abs_expr.clone(), Var(2), Var(3)]);
+        let expected = App(vec![abs_expr.clone(), BoundVar(2), BoundVar(3)]);
         assert_eq!(expr, expected);
 
         let expr = app!(1, abs_expr.clone(), 3);
-        let expected = App(vec![Var(1), abs_expr, Var(3)]);
+        let expected = App(vec![BoundVar(1), abs_expr, BoundVar(3)]);
         assert_eq!(expr, expected);
     }
 
@@ -962,156 +834,15 @@ mod tests {
     fn test_mixed_macro_nesting() {
         // Test complex nesting of abs! and app! macros
         let expr = abs!(2, app!(1, 2));
-        let expected = Abs(2, Box::new(App(vec![Var(1), Var(2)])));
+        let expected = Abs(2, Box::new(App(vec![BoundVar(1), BoundVar(2)])));
         assert_eq!(expr, expected);
 
         let expr = app!(abs!(1, 1), abs!(1, 2));
-        let expected = App(vec![Abs(1, Box::new(Var(1))), Abs(1, Box::new(Var(2)))]);
+        let expected = App(vec![
+            Abs(1, Box::new(BoundVar(1))),
+            Abs(1, Box::new(BoundVar(2))),
+        ]);
         assert_eq!(expr, expected);
-    }
-
-    #[test]
-    fn test_collect_free_variables_simple() {
-        // Test collecting free variables from simple expressions
-
-        // Single free variable
-        let expr = 5.into_expr();
-        let free_vars = collect_free_variables(&expr, 0);
-        assert_eq!(free_vars, std::iter::once(5).collect());
-
-        // No free variables (bound)
-        let expr = 1.into_expr();
-        let free_vars = collect_free_variables(&expr, 2);
-        assert!(free_vars.is_empty());
-
-        // Mixed bound and free
-        let free_vars = collect_free_variables(&3.into_expr(), 2);
-        assert_eq!(free_vars, std::iter::once(3).collect());
-    }
-
-    #[test]
-    fn test_collect_free_variables_abstraction() {
-        // Test collecting free variables from abstractions
-
-        // λ.3 - variable 3 is free (beyond binding depth 1)
-        let expr = abs!(1, 3);
-        let free_vars = collect_free_variables(&expr, 0);
-        assert_eq!(free_vars, std::iter::once(3).collect());
-
-        // λλ.3 - variable 3 is free (beyond binding depth 2)
-        let expr = abs!(2, 3);
-        let free_vars = collect_free_variables(&expr, 0);
-        assert_eq!(free_vars, std::iter::once(3).collect());
-
-        // λ.1 - no free variables (1 is bound)
-        let expr = abs!(1, 1);
-        let free_vars = collect_free_variables(&expr, 0);
-        assert!(free_vars.is_empty());
-    }
-
-    #[test]
-    fn test_collect_free_variables_application() {
-        // Test collecting free variables from applications
-
-        // 3 4 - both are free variables
-        let expr = app!(3, 4);
-        let free_vars = collect_free_variables(&expr, 2);
-        assert_eq!(free_vars, [3, 4].into_iter().collect());
-
-        // λ.2 3 - variable 3 is free, 2 is bound
-        let expr = app!(abs!(1, 2), 3);
-        let free_vars = collect_free_variables(&expr, 0);
-        assert_eq!(free_vars, [2, 3].into_iter().collect());
-    }
-
-    #[test]
-    fn test_find_max_binding_depth() {
-        // Test finding maximum binding depth
-
-        // Single variable - no binding
-        let expr = 5.into_expr();
-        assert_eq!(find_max_binding_depth(&expr), 0);
-
-        // Single abstraction
-        let expr = abs!(1, 1);
-        assert_eq!(find_max_binding_depth(&expr), 1);
-
-        // Multi-level abstraction
-        let expr = abs!(3, 1);
-        assert_eq!(find_max_binding_depth(&expr), 3);
-
-        // Nested abstractions
-        let expr = abs!(1, abs!(2, 1));
-        assert_eq!(find_max_binding_depth(&expr), 3);
-
-        // Application with different depths
-        let expr = app!(abs!(2, 1), abs!(1, 1));
-        assert_eq!(find_max_binding_depth(&expr), 2);
-    }
-
-    #[test]
-    fn test_normalize_free_variables_simple() {
-        // Test basic free variable normalization
-
-        // Single free variable: 5 → 1
-        let expr = 5.into_expr();
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, 1.into_expr());
-
-        // Multiple free variables: 7 3 → 1 2
-        let expr = app!(7, 3);
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, app!(2, 1)); // Note: sorted order
-    }
-
-    #[test]
-    fn test_normalize_free_variables_with_abstractions() {
-        // Test free variable normalization with abstractions
-
-        // λ.5 → λ.2 (first free variable after binding depth 1)
-        let expr = abs!(1, 5);
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, abs!(1, 2));
-
-        // λλ.7 → λλ.3 (first free variable after binding depth 2)
-        let expr = abs!(2, 7);
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, abs!(2, 3));
-
-        // λ.3 5 → λ.2 3 (free variables become consecutive)
-        let expr = abs!(1, app!(3, 5));
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, abs!(1, app!(2, 3)));
-    }
-
-    #[test]
-    fn test_normalize_free_variables_complex() {
-        // Test complex expressions with mixed bound and free variables
-
-        // λ.λ.1 3 5 → λ.λ.1 3 4 (bound variable 1 unchanged, free variables normalized)
-        let expr = abs!(1, abs!(1, app!(1, app!(3, 5))));
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, abs!(1, abs!(1, app!(1, app!(3, 4)))));
-
-        // (λ.3) 7 → (λ.2) 3 (both free variables normalized)
-        let expr = app!(abs!(1, 3), 7);
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, app!(abs!(1, 2), 3));
-    }
-
-    #[test]
-    fn test_normalize_free_variables_no_change() {
-        // Test expressions that should not change
-
-        // No free variables
-        let expr = abs!(2, 1);
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, expr);
-
-        // Already normalized free variables
-        let expr = abs!(1, 2);
-        let normalized = normalize_free_variables(&expr);
-        assert_eq!(normalized, expr);
     }
 
     #[test]
@@ -1131,17 +862,17 @@ mod tests {
 
     #[test]
     fn test_simplify_with_normalization() {
-        // Test that simplify now includes free variable normalization
+        // Test that simplify compresses abstractions but doesn't normalize variables
 
-        // λ.λ.5 → λλ.3 (compression + normalization)
+        // λ.λ.5 → λλ.5 (compression only)
         let expr = abs!(1, abs!(1, 5));
         let simplified = simplify(&expr);
-        assert_eq!(simplified, abs!(2, 3));
+        assert_eq!(simplified, abs!(2, 5));
 
-        // Complex: λ.(λ.7) 9 → λ.(λ.3) 4
+        // Complex: λ.(λ.7) 9 → λ.(λ.7) 9
         let expr = abs!(1, app!(abs!(1, 7), 9));
         let simplified = simplify(&expr);
-        assert_eq!(simplified, abs!(1, app!(abs!(1, 3), 4)));
+        assert_eq!(simplified, abs!(1, app!(abs!(1, 7), 9)));
     }
 
     #[test]
@@ -1155,35 +886,14 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_free_variable_mapping() {
-        // Test the mapping application function
-        let mapping = [(5, 2), (7, 3)].into_iter().collect();
-
-        // Simple variable mapping
-        let expr = 5.into_expr();
-        let mapped = apply_free_variable_mapping(&expr, &mapping, 0);
-        assert_eq!(mapped, 2.into_expr());
-
-        // Bound variable unchanged
-        let expr = 1.into_expr();
-        let mapped = apply_free_variable_mapping(&expr, &mapping, 2);
-        assert_eq!(mapped, 1.into_expr());
-
-        // Mixed mapping in application
-        let expr = app!(5, 7);
-        let mapped = apply_free_variable_mapping(&expr, &mapping, 0);
-        assert_eq!(mapped, app!(2, 3));
-    }
-
-    #[test]
     fn test_complex_macro_expression() {
         // Test a complex expression using macros: λλ.(2 (λ.1 3))
         let expr = abs!(2, app!(2, app!(abs!(1, 1), 3)));
         let expected = Abs(
             2,
             Box::new(App(vec![
-                Var(2),
-                App(vec![Abs(1, Box::new(Var(1))), Var(3)]),
+                BoundVar(2),
+                App(vec![Abs(1, Box::new(BoundVar(1))), BoundVar(3)]),
             ])),
         );
         assert_eq!(expr, expected);
@@ -1193,7 +903,7 @@ mod tests {
     fn test_app_macro_trailing_comma() {
         // Test that trailing commas work in app! macro
         let expr = app!(1, 2, 3,);
-        let expected = App(vec![Var(1), Var(2), Var(3)]);
+        let expected = App(vec![BoundVar(1), BoundVar(2), BoundVar(3)]);
         assert_eq!(expr, expected);
     }
 
@@ -1216,9 +926,9 @@ mod tests {
         // Test IntoExpr trait implementations directly
         let usize_val: usize = 5;
         let expr_from_usize = usize_val.into_expr();
-        assert_eq!(expr_from_usize, Var(5));
+        assert_eq!(expr_from_usize, BoundVar(5));
 
-        let expr_val = Abs(1, Box::new(Var(1)));
+        let expr_val = Abs(1, Box::new(BoundVar(1)));
         let expr_from_expr = expr_val.clone().into_expr();
         assert_eq!(expr_from_expr, expr_val);
     }
@@ -1229,9 +939,9 @@ mod tests {
 
         // Verbose way
         let verbose = App(vec![
-            Abs(2, Box::new(Var(1))),
-            Var(3),
-            App(vec![Var(4), Var(5)]),
+            Abs(2, Box::new(BoundVar(1))),
+            BoundVar(3),
+            App(vec![BoundVar(4), BoundVar(5)]),
         ]);
 
         // Macro way

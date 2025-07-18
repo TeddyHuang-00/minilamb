@@ -10,6 +10,8 @@ pub use expr::{Expr, IntoExpr, simplify};
 pub use lexer::{Lexer, Token};
 pub use parser::{ParseError, ParseMode, Parser};
 
+// Macros are automatically exported at the crate root by #[macro_export]
+
 /// Parse a lambda calculus expression from a string.
 ///
 /// This is a convenience function that automatically detects the input format
