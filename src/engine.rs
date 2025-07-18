@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_reduce_once_variable() {
-        let var = Expr::var(1);
+        let var = Expr::BoundVar(1);
         let result = reduce_once(&var).unwrap();
         assert_eq!(result, None);
     }
@@ -197,8 +197,8 @@ mod tests {
         let app = app!(identity, 2);
 
         let result = reduce_once(&app).unwrap();
-        // The result should be var(2) since free variable in 1-based indexing
-        assert_eq!(result, Some(Expr::var(2)));
+        // The result should be BoundVar(2) since free variable in 1-based indexing
+        assert_eq!(result, Some(Expr::BoundVar(2)));
     }
 
     #[test]

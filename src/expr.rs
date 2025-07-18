@@ -354,52 +354,6 @@ mod tests {
 
     use super::*;
 
-    /// Helper function for testing
-    impl Expr {
-        /// Creates a bound variable with a De Bruijn index.
-        ///
-        /// # Panics
-        /// Panics if `index` is 0, since De Bruijn indices are 1-based.
-        #[must_use]
-        pub fn var(index: usize) -> Self {
-            assert!(index > 0, "Variable index must be positive");
-            BoundVar(index)
-        }
-
-        #[must_use]
-        pub fn abs(body: Self) -> Self {
-            Abs(1, Box::new(body))
-        }
-
-        /// Creates a multi-level abstraction with the given level and body
-        ///
-        /// # Panics
-        /// Panics if level is 0 (must be positive)
-        #[must_use]
-        pub fn abs_multi(level: usize, body: Self) -> Self {
-            assert!(level > 0, "Abstraction level must be positive");
-            Abs(level, Box::new(body))
-        }
-
-        #[must_use]
-        pub fn app(func: Self, arg: Self) -> Self {
-            App(vec![func, arg])
-        }
-
-        /// Creates a multi-argument application
-        ///
-        /// # Panics
-        /// Panics if the vector has fewer than 2 elements
-        #[must_use]
-        pub fn app_multi(exprs: Vec<Self>) -> Self {
-            assert!(
-                exprs.len() >= 2,
-                "Application must have at least 2 expressions (function + argument)"
-            );
-            App(exprs)
-        }
-    }
-
     #[test]
     fn test_var_display() {
         let expr = BoundVar(1);
