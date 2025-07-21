@@ -2,7 +2,7 @@ use anyhow::Result;
 use thiserror::Error;
 
 use crate::{
-    engine::simplify,
+    engine::{index_to_name, simplify},
     expr::Expr,
     lexer::{Lexer, Token},
 };
@@ -316,25 +316,7 @@ impl Parser {
         let free_var_index = index - binding_depth - 1;
 
         // Generate name: a-z, aa-az, ba-bz, etc.
-        Self::index_to_name(free_var_index)
-    }
-
-    fn index_to_name(index: usize) -> String {
-        // Convert index to a-z, aa-az, ba-bz, etc. format
-        let alphabet_size = 26;
-        let mut index = index;
-        let mut name = vec![];
-        loop {
-            name.push(char::from(
-                b'a' + u8::try_from(index % alphabet_size).unwrap_or(b'z' - b'a'),
-            ));
-            index /= alphabet_size;
-            if index == 0 {
-                break;
-            }
-        }
-        name.reverse();
-        name.into_iter().collect()
+        index_to_name(free_var_index)
     }
 
     fn peek(&self) -> Option<&Token> {

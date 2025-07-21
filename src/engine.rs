@@ -140,8 +140,9 @@ pub fn substitute(idx: usize, src: &Expr, tgt: &Expr) -> Result<Expr> {
 /// ```
 #[must_use]
 pub fn simplify(expr: &Expr) -> Expr {
-    // do abstraction compression
-    compress_abstractions(expr)
+    // First compress abstractions, then normalize free variables
+    let compressed = compress_abstractions(expr);
+    normalize_free_variables(&compressed, 0)
 }
 
 /// Compresses consecutive abstractions in an expression.
@@ -175,6 +176,78 @@ fn compress_abstractions(expr: &Expr) -> Expr {
             App(compressed_exprs)
         }
     }
+}
+
+/// Converts free variables represented as De Bruijn indices to named variables.
+///
+/// For any bound variable with index greater than the binding depth, converts
+/// it to a free variable with a name following the same logic used in the
+/// parser: a, b, c, ..., z, aa, ab, etc.
+///
+/// # Arguments
+/// * `expr` - The expression to normalize
+/// * `binding_depth` - Current depth of lambda bindings (0 at top level)
+///
+/// # Returns
+/// Returns the expression with free variables converted to names.
+fn normalize_free_variables(expr: &Expr, binding_depth: usize) -> Expr {
+    use Expr::{Abs, App, BoundVar, FreeVar};
+    match expr {
+        BoundVar(k) => {
+            if *k > binding_depth {
+                // This is a free variable - convert to named variable
+                let free_var_index = k - binding_depth - 1;
+                let name = index_to_name(free_var_index);
+                FreeVar(name)
+            } else {
+                BoundVar(*k)
+            }
+        }
+        FreeVar(name) => FreeVar(name.clone()),
+        Abs(level, body) => {
+            let normalized_body = normalize_free_variables(body, binding_depth + level);
+            Abs(*level, Box::new(normalized_body))
+        }
+        App(exprs) => {
+            let normalized_exprs: Vec<Expr> = exprs
+                .iter()
+                .map(|expr| normalize_free_variables(expr, binding_depth))
+                .collect();
+            App(normalized_exprs)
+        }
+    }
+}
+
+/// Converts an index to a variable name following the pattern a, b, c, ..., z,
+/// aa, ab, etc.
+///
+/// # Arguments
+/// * `index` - The 0-based index to convert
+///
+/// # Returns
+/// Returns a string representing the variable name.
+pub(crate) fn index_to_name(index: usize) -> String {
+    let alphabet_size = 26;
+    let mut index = index;
+    let mut name = vec![];
+
+    // First character
+    name.push(char::from(
+        b'a' + u8::try_from(index % alphabet_size).unwrap_or(b'z' - b'a'),
+    ));
+    index /= alphabet_size;
+
+    // Additional characters for extended alphabet
+    while index > 0 {
+        index -= 1; // Adjust for 0-based indexing in extended positions
+        name.push(char::from(
+            b'a' + u8::try_from(index % alphabet_size).unwrap_or(b'z' - b'a'),
+        ));
+        index /= alphabet_size;
+    }
+
+    name.reverse();
+    name.into_iter().collect()
 }
 
 /// Errors that can occur during lambda calculus evaluation.
@@ -511,14 +584,14 @@ mod tests {
 
     #[test]
     fn test_simplify_variable() {
-        // Bound variables should remain unchanged
+        // Variables at top level (binding_depth 0) become free variables if > 0
         let expr = 1.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, 1.into_expr());
+        assert_eq!(simplified, Expr::FreeVar("a".into()));
 
         let expr = 5.into_expr();
         let simplified = simplify(&expr);
-        assert_eq!(simplified, 5.into_expr());
+        assert_eq!(simplified, Expr::FreeVar("e".into()));
     }
 
     #[test]
@@ -589,10 +662,10 @@ mod tests {
     #[test]
     fn test_simplify_multi_argument_application() {
         // Test simplification with multi-argument applications
-        // (λ.λ.1) a (λ.λ.2) should become (λλ.1) a (λλ.2)
+        // (λ.λ.1) 3 (λ.λ.2) should become (λλ.1) c (λλ.2)
         let app = app!(abs!(1, abs!(1, 1)), 3, abs!(1, abs!(1, 2)));
         let simplified = simplify(&app);
-        let expected = app!(abs!(2, 1), 3, abs!(2, 2));
+        let expected = app!(abs!(2, 1), "c", abs!(2, 2));
         assert_eq!(simplified, expected);
     }
 
@@ -603,10 +676,10 @@ mod tests {
         let simplified = simplify(&expr);
         assert_eq!(simplified, expr);
 
-        // Variables remain unchanged: (λλ.1) 2 → (λλ.1) 2
+        // Free variables get converted to names: (λλ.1) 2 → (λλ.1) b
         let expr = app!(abs!(2, 1), 2);
         let simplified = simplify(&expr);
-        assert_eq!(simplified, app!(abs!(2, 1), 2));
+        assert_eq!(simplified, app!(abs!(2, 1), "b"));
     }
 
     #[test]
@@ -645,17 +718,20 @@ mod tests {
 
     #[test]
     fn test_simplify_with_normalization() {
-        // Test that simplify compresses abstractions but doesn't normalize variables
+        // Test that simplify compresses abstractions and normalizes free variables
 
-        // λ.λ.5 → λλ.5 (compression only)
+        // λ.λ.5 → λλ.c (compression + normalization: 5 > binding_depth 2, so 5-2-1=2 →
+        // c)
         let expr = abs!(1, abs!(1, 5));
         let simplified = simplify(&expr);
-        assert_eq!(simplified, abs!(2, 5));
+        assert_eq!(simplified, abs!(2, "c"));
 
-        // Complex: λ.(λ.7) 9 → λ.(λ.7) 9
+        // Complex: λ.(λ.7) 9 → λ.(λ.e) h (normalization applied)
+        // In λ.7, binding_depth=1+1=2, so 7>2 → free var index 7-2-1=4 → e
+        // In 9, binding_depth=1, so 9>1 → free var index 9-1-1=7 → h
         let expr = abs!(1, app!(abs!(1, 7), 9));
         let simplified = simplify(&expr);
-        assert_eq!(simplified, abs!(1, app!(abs!(1, 7), 9)));
+        assert_eq!(simplified, abs!(1, app!(abs!(1, "e"), "h")));
     }
 
     #[test]
@@ -1096,5 +1172,117 @@ mod tests {
             // of multi-level abstractions with nested applications
             // may lead to invalid shift operations
         }
+    }
+
+    #[test]
+    fn test_normalize_free_variables_simple() {
+        // Test basic free variable normalization
+        // λ.2 should become λ.a (2 > binding_depth 1, so it's free)
+        let expr = abs!(1, 2);
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(1, "a"));
+
+        // λ.1 should stay λ.1 (1 <= binding_depth 1, so it's bound)
+        let expr = abs!(1, 1);
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(1, 1));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_multiple_levels() {
+        // Test with multiple abstraction levels
+        // λλ.3 should become λλ.a (3 > binding_depth 2, so it's free)
+        let expr = abs!(2, 3);
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(2, "a"));
+
+        // λλ.2 should stay λλ.2 (2 <= binding_depth 2, so it's bound)
+        let expr = abs!(2, 2);
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(2, 2));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_multiple_free_vars() {
+        // Test with multiple free variables
+        // λ.(2 3 4) should become λ.(a b c)
+        let expr = abs!(1, app!(2, 3, 4));
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(1, app!("a", "b", "c")));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_mixed() {
+        // Test with mixed bound and free variables
+        // λλ.(1 2 3 4) should become λλ.(1 2 a b)
+        let expr = abs!(2, app!(1, 2, 3, 4));
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(2, app!(1, 2, "a", "b")));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_nested_abstractions() {
+        // Test with nested abstractions
+        // λ.λ.3 should become λ.λ.a (3 > binding_depth 2, so it's free)
+        let expr = abs!(1, abs!(1, 3));
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(1, abs!(1, "a")));
+    }
+
+    #[test]
+    fn test_index_to_name_simple() {
+        // Test basic index to name conversion
+        assert_eq!(index_to_name(0), "a");
+        assert_eq!(index_to_name(1), "b");
+        assert_eq!(index_to_name(25), "z");
+    }
+
+    #[test]
+    fn test_index_to_name_extended() {
+        // Test extended alphabet (aa, ab, etc.)
+        assert_eq!(index_to_name(26), "aa");
+        assert_eq!(index_to_name(27), "ab");
+        assert_eq!(index_to_name(51), "az");
+        assert_eq!(index_to_name(52), "ba");
+    }
+
+    #[test]
+    fn test_simplify_with_free_variable_normalization() {
+        // Test that simplify now includes free variable normalization
+        // λ.λ.3 should become λλ.a (compression + normalization)
+        let expr = abs!(1, abs!(1, 3));
+        let result = simplify(&expr);
+        assert_eq!(result, abs!(2, "a"));
+
+        // Complex example: (λ.λ.3) (λ.2) should compress and normalize
+        let expr = app!(abs!(1, abs!(1, 3)), abs!(1, 2));
+        let result = simplify(&expr);
+        assert_eq!(result, app!(abs!(2, "a"), abs!(1, "a")));
+    }
+
+    #[test]
+    fn test_simplify_preserves_bound_variables() {
+        // Test that bound variables are preserved after normalization
+        // λλλ.2 should stay λλλ.2 (2 <= binding_depth 3)
+        let expr = abs!(1, abs!(1, abs!(1, 2)));
+        let result = simplify(&expr);
+        assert_eq!(result, abs!(3, 2));
+
+        // λλ.(1 2) should stay λλ.(1 2)
+        let expr = abs!(2, app!(1, 2));
+        let result = simplify(&expr);
+        assert_eq!(result, abs!(2, app!(1, 2)));
+    }
+
+    #[test]
+    fn test_normalize_free_variables_already_free_vars() {
+        // Test that already free variables are preserved
+        let expr = abs!(1, "x");
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, abs!(1, "x"));
+
+        let expr = app!("x", "y", abs!(1, "z"));
+        let result = normalize_free_variables(&expr, 0);
+        assert_eq!(result, app!("x", "y", abs!(1, "z")));
     }
 }
