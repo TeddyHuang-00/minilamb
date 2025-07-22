@@ -1,8 +1,6 @@
 use minilamb::{parse, parse_and_evaluate};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== minilamb Parser Demo ===\n");
-
     // Test different lambda symbols
     println!("Testing alternative lambda symbols:");
     let expressions = ["λx.x", "\\x.x", "/x.x", "|x.x"];
@@ -47,6 +45,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let application = parse("λx.λy.λz.x y z")?;
     println!("  Application: λx.λy.λz.x y z -> {application}");
 
-    println!("\n=== All tests passed! ===");
     Ok(())
 }
