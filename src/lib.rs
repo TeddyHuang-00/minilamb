@@ -5,7 +5,7 @@ pub mod parser;
 
 use anyhow::Result;
 // Re-export main types and functions for convenient use
-pub use engine::{EvaluationError, evaluate, reduce_once, shift, simplify, substitute};
+pub use engine::{EvaluationError, evaluate, reduce_once, replace, shift, simplify, substitute};
 pub use expr::{Expr, IntoExpr};
 pub use lexer::{Lexer, Token};
 pub use parser::{ParseError, ParseMode, Parser};

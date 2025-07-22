@@ -250,6 +250,96 @@ pub(crate) fn index_to_name(index: usize) -> String {
     name.into_iter().collect()
 }
 
+/// Substitute all occurrences of a named free variable with an expression.
+///
+/// This function replaces all instances of a free variable (identified by name)
+/// with the provided substitute expression throughout the target expression.
+/// When entering lambda abstractions, the substitute expression is properly
+/// shifted to maintain correct variable bindings.
+///
+/// # Arguments
+/// * `var_name` - The name of the free variable to replace
+/// * `substitute` - The expression to substitute in place of the variable
+/// * `target` - The expression containing free variables to be replaced
+///
+/// # Returns
+/// A new expression with all instances of the named free variable replaced.
+///
+/// # Errors
+/// Returns an error if variable shifting would create invalid references.
+///
+/// # Examples
+/// ```
+/// use minilamb::{abs, app, expr::Expr, engine::replace};
+///
+/// // Replace 'x' with 'y' in expression: x → y
+/// let substitute = Expr::FreeVar("y".to_string());
+/// let target = Expr::FreeVar("x".to_string());
+/// let result = replace("x", &substitute, &target).unwrap();
+/// assert_eq!(result, Expr::FreeVar("y".to_string()));
+///
+/// // Replace 'x' with bound variable in abstraction: λ.x → λ.1
+/// let substitute = Expr::BoundVar(1);
+/// let target = abs!(1, "x");
+/// let result = replace("x", &substitute, &target).unwrap();
+/// assert_eq!(result, abs!(1, 2)); // substitute shifted by abstraction level
+/// ```
+pub fn replace(var_name: &str, substitute: &Expr, target: &Expr) -> Result<Expr> {
+    replace_with_depth(var_name, substitute, target, 0)
+}
+
+/// Internal helper for `replace` that tracks abstraction depth.
+///
+/// This function performs the actual recursive substitution while maintaining
+/// proper De Bruijn index shifting as it enters nested lambda abstractions.
+///
+/// # Arguments
+/// * `var_name` - The name of the free variable to replace
+/// * `substitute` - The expression to substitute in place of the variable
+/// * `target` - The expression containing free variables to be replaced
+/// * `depth` - Current abstraction depth for proper variable shifting
+///
+/// # Returns
+/// A new expression with all instances of the named free variable replaced.
+///
+/// # Errors
+/// Returns an error if variable shifting would create invalid references.
+fn replace_with_depth(
+    var_name: &str,
+    substitute: &Expr,
+    target: &Expr,
+    depth: usize,
+) -> Result<Expr> {
+    use Expr::{Abs, App, BoundVar, FreeVar};
+
+    match target {
+        BoundVar(k) => Ok(BoundVar(*k)),
+        FreeVar(name) => {
+            if name == var_name {
+                // Shift the substitute expression by the current depth
+                if depth > 0 {
+                    shift(depth.try_into()?, 0, substitute)
+                } else {
+                    Ok(substitute.clone())
+                }
+            } else {
+                Ok(FreeVar(name.clone()))
+            }
+        }
+        Abs(level, body) => {
+            let substituted_body = replace_with_depth(var_name, substitute, body, depth + level)?;
+            Ok(Abs(*level, Box::new(substituted_body)))
+        }
+        App(exprs) => {
+            let substituted_exprs: Result<Vec<Expr>> = exprs
+                .iter()
+                .map(|expr| replace_with_depth(var_name, substitute, expr, depth))
+                .collect();
+            Ok(App(substituted_exprs?))
+        }
+    }
+}
+
 /// Errors that can occur during lambda calculus evaluation.
 ///
 /// This enum represents the different failure modes when evaluating
@@ -883,8 +973,6 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    // === COMPREHENSIVE SUBSTITUTE TESTS ===
-
     #[test]
     fn test_substitute_no_matching_variables() {
         // Test substitution when no variables match
@@ -1284,5 +1372,193 @@ mod tests {
         let expr = app!("x", "y", abs!(1, "z"));
         let result = normalize_free_variables(&expr, 0);
         assert_eq!(result, app!("x", "y", abs!(1, "z")));
+    }
+
+    #[test]
+    fn test_replace_simple() {
+        // Replace 'x' with 'y': x → y
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = Expr::FreeVar("x".to_string());
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, Expr::FreeVar("y".to_string()));
+    }
+
+    #[test]
+    fn test_replace_no_match() {
+        // Replace 'x' with 'y' in 'z': z → z (no change)
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = Expr::FreeVar("z".to_string());
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, Expr::FreeVar("z".to_string()));
+    }
+
+    #[test]
+    fn test_replace_bound_var_unchanged() {
+        // Replace 'x' with 'y' in bound variable: 1 → 1 (no change)
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = Expr::BoundVar(1);
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, Expr::BoundVar(1));
+    }
+
+    #[test]
+    fn test_replace_with_bound_var_substitute() {
+        // Replace 'x' with bound variable: x → 1
+        let substitute = Expr::BoundVar(1);
+        let target = Expr::FreeVar("x".to_string());
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, Expr::BoundVar(1));
+    }
+
+    #[test]
+    fn test_replace_in_application() {
+        // Replace 'x' with 'y' in application: (x z) → (y z)
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = app!("x", "z");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, app!("y", "z"));
+
+        // Multiple occurrences: (x x z) → (y y z)
+        let target = app!("x", "x", "z");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, app!("y", "y", "z"));
+    }
+
+    #[test]
+    fn test_replace_in_abstraction() {
+        // Replace 'x' with 'y' in abstraction body: λ.x → λ.y
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = abs!(1, "x");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, abs!(1, "y"));
+    }
+
+    #[test]
+    fn test_replace_with_shifting() {
+        // Replace 'x' with bound variable in abstraction: λ.x → λ.2
+        // The substitute (BoundVar(1)) gets shifted by the abstraction level (1)
+        let substitute = Expr::BoundVar(1);
+        let target = abs!(1, "x");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, abs!(1, 2)); // 1 + 1 = 2
+    }
+
+    #[test]
+    fn test_replace_multi_level_abstraction() {
+        // Replace 'x' with bound variable in multi-level abstraction: λλ.x → λλ.3
+        // The substitute (BoundVar(1)) gets shifted by the abstraction levels (2)
+        let substitute = Expr::BoundVar(1);
+        let target = abs!(2, "x");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, abs!(2, 3)); // 1 + 2 = 3
+    }
+
+    #[test]
+    fn test_replace_nested_abstractions() {
+        // Replace 'x' with bound variable in nested abstractions: λ.λ.x → λ.λ.3
+        // The substitute (BoundVar(1)) gets shifted by total depth (1+1=2)
+        let substitute = Expr::BoundVar(1);
+        let target = abs!(1, abs!(1, "x"));
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, abs!(1, abs!(1, 3))); // 1 + 2 = 3
+    }
+
+    #[test]
+    fn test_replace_complex_expression() {
+        // Replace 'x' in complex expression: (λ.(x 1)) (λ.x) → (λ.(y 1)) (λ.y)
+        let substitute = Expr::FreeVar("y".to_string());
+        let inner1 = abs!(1, app!("x", 1));
+        let inner2 = abs!(1, "x");
+        let target = app!(inner1, inner2);
+
+        let result = replace("x", &substitute, &target).unwrap();
+        let expected = app!(abs!(1, app!("y", 1)), abs!(1, "y"));
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_replace_mixed_bound_free() {
+        // Replace 'x' in expression with mixed bound and free variables
+        // λλ.(1 x 2 y) with substitute 'x' → 'z' becomes λλ.(1 z 2 y)
+        let substitute = Expr::FreeVar("z".to_string());
+        let target = abs!(2, app!(1, "x", 2, "y"));
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, abs!(2, app!(1, "z", 2, "y")));
+    }
+
+    #[test]
+    fn test_replace_no_occurrences() {
+        // Replace 'x' in expression that doesn't contain 'x'
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = abs!(1, app!(1, "z"));
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, target); // Should be unchanged
+    }
+
+    #[test]
+    fn test_replace_has_free_vars() {
+        // Replace 'x' with expression containing free variables
+        // x with substitute (y z) in λ.x becomes λ.(y z)
+        let substitute = app!("y", "z");
+        let target = abs!(1, "x");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, abs!(1, app!("y", "z")));
+    }
+
+    #[test]
+    fn test_replace_with_bound_vars_shifted() {
+        // Replace 'x' with expression containing bound variables that need shifting
+        // x with substitute (1 2) in λλ.x becomes λλ.(3 4)
+        let substitute = app!(1, 2);
+        let target = abs!(2, "x");
+        let result = replace("x", &substitute, &target).unwrap();
+        // Both BoundVar(1) and BoundVar(2) get shifted by 2 levels
+        assert_eq!(result, abs!(2, app!(3, 4)));
+    }
+
+    #[test]
+    fn test_replace_partial_matches() {
+        // Replace 'x' in expression with similar variable names
+        // Should only replace exact matches, not partial matches
+        let substitute = Expr::FreeVar("y".to_string());
+        let target = app!("x", "xx", "x1");
+        let result = replace("x", &substitute, &target).unwrap();
+        // Only 'x' should be replaced, not 'xx' or 'x1'
+        assert_eq!(result, app!("y", "xx", "x1"));
+    }
+
+    #[test]
+    fn test_replace_complex_substitute() {
+        // Replace 'x' with a complex expression containing abstractions
+        // x with substitute λ.(1 y) in application (x z)
+        let substitute = abs!(1, app!(1, "y"));
+        let target = app!("x", "z");
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, app!(abs!(1, app!(1, "y")), "z"));
+    }
+
+    #[test]
+    fn test_replace_deeply_nested() {
+        // Test with deeply nested structure
+        // λλλ.(x (λλ.x) 1) with substitute 'x' → 'y'
+        let substitute = Expr::FreeVar("y".to_string());
+        let inner_abs = abs!(2, "x");
+        let inner_app = app!("x", inner_abs, 1);
+        let target = abs!(3, inner_app);
+
+        let result = replace("x", &substitute, &target).unwrap();
+        let expected_inner_abs = abs!(2, "y");
+        let expected_inner_app = app!("y", expected_inner_abs, 1);
+        let expected = abs!(3, expected_inner_app);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_replace_self_reference() {
+        // Replace 'x' with 'x' (should be identity)
+        let substitute = Expr::FreeVar("x".to_string());
+        let target = app!("x", abs!(1, "x"));
+        let result = replace("x", &substitute, &target).unwrap();
+        assert_eq!(result, target); // Should be unchanged
     }
 }
